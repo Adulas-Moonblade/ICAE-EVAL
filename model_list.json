@@ -1,5 +1,5 @@
 {
-  "_comment": "Model registry TEMPLATE. Replace every <...> placeholder with your own gateway URL / token. 'Tested Model' = the agent-under-test (SUT); 'Critic Model' = the LLM reviewer used by the Agentic metric. Each model name maps EITHER to a single endpoint dict OR to a LIST of interchangeable endpoints (same model, different provider/token) that are load-balanced round-robin. An endpoint carries ANTHROPIC_* (used by the claude-code runner) and/or OPENHANDS_* (used by the openhands runner); the runner picks the fields for its framework.",
+  "_comment": "Model registry TEMPLATE. Replace every <...> placeholder with your own gateway URL / token. 'Tested Model' = the agent-under-test (SUT); 'Critic Model' = the LLM reviewer used by the Agentic metric. Each model name maps EITHER to a single endpoint dict OR to a LIST of interchangeable endpoints (same model, different provider/token) that are load-balanced round-robin. ANTHROPIC_* is used by Claude Code, OPENHANDS_* by OpenHands. Codex CLI uses its own user config/auth and needs no entry here; an optional CODEX_MODEL entry overrides only its model.",
 
   "Tested Model": {
     "Opus-4.8": [
@@ -38,11 +38,10 @@
   },
 
   "Critic Model": {
-    "Deepseek-V4-Flash": [
+    "Deepseek-V4.1-Flash": [
       {
-        "ANTHROPIC_MODEL": "<provider-model-id>",
-        "ANTHROPIC_BASE_URL": "<https://your-anthropic-gateway/v1/anthropic/>",
-        "ANTHROPIC_AUTH_TOKEN": "<YOUR_TOKEN>"
+        "OPENAI_MODEL": "deepseek-v4.1-flash",
+        "OPENAI_CREDENTIALS_FROM_USER_MODEL": "Qwen3.8-Flash"
       }
     ]
   }

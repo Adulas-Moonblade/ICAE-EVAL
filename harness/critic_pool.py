@@ -35,6 +35,9 @@ MAX_WAIT = 600.0        # max total seconds run() will wait across cooldowns
 
 
 def _label(entry: dict) -> str:
+    if entry.get("OPENAI_MODEL"):
+        source = entry.get("OPENAI_CREDENTIALS_FROM_USER_MODEL", "openai")
+        return f"{entry['OPENAI_MODEL']}#{source}"
     model = entry.get("ANTHROPIC_MODEL", "?")
     tok = str(entry.get("ANTHROPIC_AUTH_TOKEN", ""))[-4:]
     return f"{model}#{tok}"

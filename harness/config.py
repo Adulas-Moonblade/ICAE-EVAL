@@ -18,6 +18,7 @@ tars are unpacked outside the repo tree:
   ICAE_DOCKER_LANG_DIR    base-image tars              (download_scaffold.sh out)
   ICAE_SANDBOX_IMGS_DIR   per-repo ultimate sandbox images (optional)
   ICAE_CLAUDE_CLI         path to the `claude` CLI binary (default: on $PATH)
+  ICAE_CODEX_CLI          path to the `codex` CLI binary (default: on $PATH)
 """
 import json
 import os
@@ -84,7 +85,9 @@ ALIAS_FILE = ROOT / "repo_alias.json"
 # In the release, the User Agent lives inside the repo (user_agent/).
 USER_AGENT_DIR = ROOT / "user_agent"
 FUZZY_SUFFIX_FILE = USER_AGENT_DIR / "fuzzy_suffix.md"
-USER_MODEL_FILE = USER_AGENT_DIR / "user_model.json"
+USER_MODEL_FILE = USER_AGENT_DIR / "user_model.local.json"
+if not USER_MODEL_FILE.exists():
+    USER_MODEL_FILE = USER_AGENT_DIR / "user_model.json"
 # Demo init key (matches user_agent/main.py INIT_KEY). The harness holds it;
 # the agent-under-test never sees it. Override both sides for a real deployment.
 INIT_KEY = "zVtwLTkCKwoCWq4Jq9D2"
@@ -262,7 +265,7 @@ def docker_egress_args() -> list[str]:
 # Structure (per task.md): each model name maps to ONE endpoint dict OR a LIST of
 # interchangeable endpoint dicts (a pool of same-model variants):
 #   {"Tested Model": {<name>: [{ANTHROPIC_*[, OPENHANDS_*]}, ...]},
-#    "Critic Model": {<name>: [{ANTHROPIC_*}, ...]}}
+#    "Critic Model": {<name>: [{ANTHROPIC_* or OPENAI_*, ...}]}}
 def load_model_list() -> dict:
     return json.loads(MODEL_LIST_FILE.read_text(encoding="utf-8"))
 

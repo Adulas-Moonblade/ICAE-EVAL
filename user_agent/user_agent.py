@@ -35,7 +35,9 @@ PRD_DIR_EASY = BASE_DIR / "prd_json_easy"
 REALCODE_REPOS_DIR = Path(
     os.environ.get("ICAE_GOLDEN_REPOS_DIR", str(BASE_DIR.parent / "realcode_repos"))
 )
-USER_MODEL_PATH = BASE_DIR / "user_model.json"
+USER_MODEL_PATH = BASE_DIR / "user_model.local.json"
+if not USER_MODEL_PATH.exists():
+    USER_MODEL_PATH = BASE_DIR / "user_model.json"
 
 PRD_DIRS = {
     "normal": PRD_DIR,

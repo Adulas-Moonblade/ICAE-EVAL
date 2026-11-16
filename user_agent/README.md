@@ -43,6 +43,8 @@ user_agent/
 
 Oracle 使用的模型在 `user_model.json` 里配置（与被测模型的 `model_list.json` 同构）。每个模型键映射到一个或多个后端端点；运行时按轮询 + 失败跳过来分流高并发请求：
 
+需要填写真实密钥时，复制为 `user_model.local.json` 并在副本中填写。该文件已被 Git 忽略，存在时会优先读取。
+
 ```json
 {
   "DeepSeek-V3.2": [

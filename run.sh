@@ -15,11 +15,18 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CALLER_PYTHON="${PYTHON:-}"
+CALLER_USER_MODEL_NAME="${USER_MODEL_NAME:-}"
+CALLER_MODEL_NAME="${MODEL_NAME:-}"
 source "$ROOT/scripts/_common.sh"
 
 MODEL_NAME="${MODEL_NAME:-Opus-4.8}"
+MODEL_NAME_EXPLICIT=false
+USER_MODEL_NAME_EXPLICIT=false
+if [ -n "$CALLER_MODEL_NAME" ]; then MODEL_NAME_EXPLICIT=true; fi
+if [ -n "$CALLER_USER_MODEL_NAME" ]; then USER_MODEL_NAME_EXPLICIT=true; fi
 if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
     MODEL_NAME="$1"
+    MODEL_NAME_EXPLICIT=true
     shift
 fi
 
@@ -36,9 +43,11 @@ for ((index = 0; index < ${#extra_args[@]}; index++)); do
         --model-name)
             index=$((index + 1))
             MODEL_NAME="${extra_args[$index]:?--model-name requires a value}"
+            MODEL_NAME_EXPLICIT=true
             ;;
         --model-name=*)
             MODEL_NAME="${argument#*=}"
+            MODEL_NAME_EXPLICIT=true
             ;;
         --limit)
             index=$((index + 1))
@@ -92,12 +101,20 @@ for ((index = 0; index < ${#extra_args[@]}; index++)); do
         --user-model-name)
             index=$((index + 1))
             USER_MODEL_NAME="${extra_args[$index]:?--user-model-name requires a value}"
+            USER_MODEL_NAME_EXPLICIT=true
             ;;
         --user-model-name=*)
             USER_MODEL_NAME="${argument#*=}"
+            USER_MODEL_NAME_EXPLICIT=true
             ;;
     esac
 done
+
+if [ "$AGENT_FRAMEWORK" = "codex" ]; then
+    if [ "$MODEL_NAME_EXPLICIT" = false ]; then MODEL_NAME="Codex-config"; fi
+    if [ "$USER_MODEL_NAME_EXPLICIT" = false ]; then USER_MODEL_NAME="Qwen3.8-Flash"; fi
+    export USER_MODEL_NAME
+fi
 
 usage() {
     cat <<'EOF'
@@ -105,6 +122,7 @@ Usage: ./run.sh [model-name] [orchestrator options...]
 
 Defaults:
   model-name       Opus-4.8 (or $MODEL_NAME)
+                   Codex-config for the codex framework
   scope            one repo from the lite set (or $RUN_LIMIT)
   concurrency      4 (or $CONCURRENCY)
   framework        claude-code (or $AGENT_FRAMEWORK)
@@ -114,13 +132,14 @@ Examples:
   ./run.sh GLM-5.1 --difficulty easy
   RUN_LIMIT=50 ./run.sh Opus-4.8
   AGENT_FRAMEWORK=openhands ./run.sh GPT-5.5
+  ./run.sh Codex-config --agent-framework codex --no-eval
 EOF
 }
 
 for argument in "$@"; do
     if [ "$argument" = "-h" ] || [ "$argument" = "--help" ]; then
         usage
-        if "$PYTHON" -c "import anthropic, claude_agent_sdk" >/dev/null 2>&1; then
+        if "$PYTHON" -c "import anthropic, fastapi, requests" >/dev/null 2>&1; then
             echo
             "$PYTHON" -m harness.orchestrator run --help
         fi
@@ -135,8 +154,15 @@ if [ ! -x "$ROOT/.venv/bin/python" ] && [ -z "$CALLER_PYTHON" ]; then
     exit 1
 fi
 
-if ! "$PYTHON" -c "import anthropic, claude_agent_sdk, fastapi, requests" >/dev/null 2>&1; then
+if ! "$PYTHON" -c "import anthropic, fastapi, requests, openai" >/dev/null 2>&1; then
     echo "[run] Python dependencies are missing from: $PYTHON" >&2
+    echo "[run] Run 'bash setup.sh' first." >&2
+    exit 1
+fi
+
+if [ "$AGENT_FRAMEWORK" = "claude-code" ] &&
+   ! "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
+    echo "[run] Claude Agent SDK is missing from: $PYTHON" >&2
     echo "[run] Run 'bash setup.sh' first." >&2
     exit 1
 fi
@@ -168,6 +194,14 @@ if [ "$AGENT_FRAMEWORK" = "claude-code" ]; then
         exit 1
     fi
 fi
+if [ "$AGENT_FRAMEWORK" = "codex" ]; then
+    CODEX_COMMAND="${ICAE_CODEX_CLI:-codex}"
+    if ! command -v "$CODEX_COMMAND" >/dev/null 2>&1 && [ ! -x "$CODEX_COMMAND" ]; then
+        echo "[run] Codex CLI not found: $CODEX_COMMAND" >&2
+        echo "[run] Install it or set ICAE_CODEX_CLI=/path/to/codex." >&2
+        exit 1
+    fi
+fi
 
 validate_model_config() {
     local validate_oracle_config="$1"
@@ -187,25 +221,31 @@ def placeholder(value):
     return isinstance(value, str) and ("<" in value or ">" in value)
 
 model_file = root / "model_list.json"
-user_file = root / "user_agent" / "user_model.json"
+user_file = root / "user_agent" / "user_model.local.json"
+if not user_file.exists():
+    user_file = root / "user_agent" / "user_model.json"
 models = json.loads(model_file.read_text(encoding="utf-8"))
 users = json.loads(user_file.read_text(encoding="utf-8"))
 
 tested = models.get("Tested Model", {})
-if model_name not in tested:
+if framework != "codex" and model_name not in tested:
     raise SystemExit(
         f"[run] model '{model_name}' is not in model_list.json. "
         f"Available: {', '.join(sorted(tested))}"
     )
 
-entries = tested[model_name]
+entries = tested.get(model_name, {})
 entries = entries if isinstance(entries, list) else [entries]
-if framework == "openhands":
+if framework == "codex":
+    selected = [entry for entry in entries if entry.get("CODEX_MODEL")] or [{}]
+elif framework == "openhands":
     selected = [entry for entry in entries if entry.get("OPENHANDS_MODEL")] or entries
 else:
     selected = [entry for entry in entries if not entry.get("OPENHANDS_MODEL")] or entries
 
 def endpoint_is_usable(entry):
+    if framework == "codex":
+        return not entry.get("CODEX_MODEL") or not placeholder(entry["CODEX_MODEL"])
     if framework == "openhands" and entry.get("OPENHANDS_MODEL"):
         required = ("OPENHANDS_MODEL", "OPENHANDS_BASE_URL", "OPENHANDS_API_KEY")
     else:

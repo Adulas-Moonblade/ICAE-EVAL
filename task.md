@@ -1,21 +1,21 @@
 # Evaluation Guide (ICAE-Bench)
 
-An interactive code-generation evaluation platform built on `claude-agent-sdk` (the Claude Code CLI) or the OpenHands SDK. The agent-under-test receives a deliberately **fuzzy PRD**, clarifies the gaps by asking a User Agent (Oracle), then implements the feature inside a container. The platform scores the result along four metric groups: dynamic tests, structural/semantic assessment, and interaction quality.
+An interactive code-generation evaluation platform built on `claude-agent-sdk` (the Claude Code CLI), the OpenHands SDK, or Codex CLI. The agent-under-test receives a deliberately **fuzzy PRD**, clarifies the gaps by asking a User Agent (Oracle), then implements the feature inside a container. The platform scores the result along four metric groups: dynamic tests, structural/semantic assessment, and interaction quality.
 
 > Out-of-the-box scope of this release: environment is `base` (only the per-language base images ship), and PRDs run in `fuzzy` mode (Oracle interaction).
 
 ## Parameters
 
-- `model_name`: maps the agent-under-test's endpoint from `model_list.json` `"Tested Model"`.
-- `critic_model_name` (optional, default `"Deepseek-V4-Flash"`): the reviewer model for Agentic evaluation, mapped from `model_list.json` `"Critic Model"`.
+- `model_name`: maps the agent-under-test's endpoint from `model_list.json` `"Tested Model"`; for Codex CLI it may be just a run label because the CLI supplies the endpoint.
+- `critic_model_name` (optional, default `"Deepseek-V4.1-Flash"`): the reviewer model for Agentic evaluation, mapped from `model_list.json` `"Critic Model"`.
 - `eval_mode`: `["lite", "full"]`. `lite` evaluates only the first 50 repos (`realcode@001–050`); `full` evaluates all 480.
 - `difficulty`: `["normal", "easy", "medium"]`, corresponding to `fuzzy_prds/`, `fuzzy_prds_easy/`, and `fuzzy_prds_medium/` (increasing PRD detail).
 - `user_host` (optional, default `"127.0.0.1"`): host running the User Agent.
 - `user_init_port` / `user_query_port` / `user_eval_port` (optional, default 50001/50002/50003): init / question / interaction-quality-stats ports. See `user_agent/example_client.py`.
-- `user_model_name` (optional, default `"DeepSeek-V3.2"`): the model the Oracle uses; must be a key in `user_model.json` (DeepSeek-V3.2 / Gemini-3.1-Flash-Lite / Qwen3.5-4B). Synced to the User Agent at init, which binds it to the append_id.
+- `user_model_name` (optional, default `"Qwen3.8-Flash"` with Codex CLI and `"DeepSeek-V3.2"` otherwise): the model the Oracle uses; must be a key in `user_model.json` (DeepSeek-V3.2 / Gemini-3.1-Flash-Lite / Qwen3.8-Flash). Synced to the User Agent at init, which binds it to the append_id.
 - `append_id` (optional): the identifier for one experiment, returned by the User Agent. Pass it to resume; omit it to start a fresh experiment.
 - `query_count` (optional, default 16): max clarifying questions bound to an append_id.
-- `agent_framework` (optional, default `"claude-code"`): `["claude-code", "openhands"]`.
+- `agent_framework` (optional, default `"claude-code"`): `["claude-code", "openhands", "codex"]`.
 
 ## Generated-code paths
 

@@ -3,8 +3,8 @@
 Entry point. Two subcommands:
 
   run   mint/resume an append_id, then for each repo: build the PRD, provision a
-        PRD-only container, run the agent-under-test (Claude Code CLI via
-        claude-agent-sdk) in results/<append_id>/<repo>, optionally score it.
+        PRD-only container, run the selected coding agent in
+        results/<append_id>/<repo>, optionally score it.
 
   eval  re-run all scoring groups over an existing results/<append_id>
         (reuses the recorded run config, repositories, and container images).
@@ -31,7 +31,7 @@ from . import structural as struct_mod
 from . import agentic as agentic_mod
 from .critic_pool import CriticPool
 from . import user_agent_client as ua
-from .agent_runner import run_agent, RateLimited
+from .runner_common import AgentResult, RateLimited
 from .task_template import render_task_prompt
 
 RATELIMIT_BACKOFF = [30, 60, 120, 240]
@@ -156,7 +156,7 @@ def _hydrate_eval_args(args) -> dict:
         setattr(args, key, cfg.get(key, fallback))
 
     overridable = {
-        "critic_model_name": "Deepseek-V4-Flash",
+        "critic_model_name": "Deepseek-V4.1-Flash",
         "user_host": "127.0.0.1",
         "user_init_port": 50001,
         "user_query_port": 50002,
@@ -397,7 +397,11 @@ def _select_runner(framework: str):
     if framework == "openhands":
         from .openhands_runner import run_agent as oh_run_agent
         return oh_run_agent
-    return run_agent
+    if framework == "codex":
+        from .codex_runner import run_agent as codex_run_agent
+        return codex_run_agent
+    from .agent_runner import run_agent as claude_run_agent
+    return claude_run_agent
 
 
 # Transient infra/API failures that come back inside an AgentResult (status=
@@ -446,7 +450,6 @@ async def _run_with_backoff(prompt, code_path, log_path, model_entries, args,
                                   max_turns=args.max_turns, timeout=args.timeout)
         except RateLimited as e:
             if attempt >= len(RATELIMIT_BACKOFF):
-                from .agent_runner import AgentResult
                 return AgentResult(status="error", is_error=True, detail=f"ratelimited: {e}")
             delay = RATELIMIT_BACKOFF[attempt]
             print(f"  [ratelimit] rotate endpoint + backoff {delay}s (attempt {attempt + 1})")
@@ -557,12 +560,24 @@ async def run_async(args) -> None:
     if args.only_eval:
         print(f"[eval] loaded run config for append_id={args.append_id}")
     else:
-        model_entries = C.resolve_model(args.model_name)
-        # Keep only the endpoints meant for this framework: openhands wants the
-        # OPENHANDS_*-routed (litellm) variants; claude-code wants plain Anthropic
-        # gateway variants. Fall back to the whole pool when OpenHands can derive
-        # its routing from an Anthropic entry.
-        if framework == "openhands":
+        if framework == "codex":
+            # The Codex CLI owns provider routing and authentication. A registry
+            # entry is optional and may only supply a CODEX_MODEL override.
+            try:
+                configured = C.resolve_model(args.model_name)
+            except KeyError:
+                configured = []
+            model_entries = [
+                {"CODEX_MODEL": e["CODEX_MODEL"]}
+                for e in configured if e.get("CODEX_MODEL")
+            ] or [{}]
+        else:
+            model_entries = C.resolve_model(args.model_name)
+        # OpenHands wants OPENHANDS_* routing; Claude Code wants Anthropic
+        # routing. Codex has already selected CLI-only model overrides above.
+        if framework == "codex":
+            picked = model_entries
+        elif framework == "openhands":
             picked = [e for e in model_entries if "OPENHANDS_MODEL" in e]
         else:
             picked = [e for e in model_entries if "OPENHANDS_MODEL" not in e]
@@ -649,7 +664,8 @@ async def run_async(args) -> None:
             "user_eval_port": args.user_eval_port,
             "anthropic_model": model_entries[0].get("ANTHROPIC_MODEL"),
             "endpoint_model": (
-                model_entries[0].get("OPENHANDS_MODEL")
+                model_entries[0].get("CODEX_MODEL")
+                or model_entries[0].get("OPENHANDS_MODEL")
                 or model_entries[0].get("ANTHROPIC_MODEL")
             ),
             "agent_framework": getattr(args, "agent_framework", "claude-code"),
@@ -734,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--user-eval-port", type=int, default=None if eval_only else 50003,
                         help="User Agent stats port for Interaction Quality (d)")
         sp.add_argument("--critic-model-name",
-                        default=None if eval_only else "Deepseek-V4-Flash",
+                        default=None if eval_only else "Deepseek-V4.1-Flash",
                         help="key in model_list.json['Critic Model'] for Agentic eval (c)")
         sp.add_argument("--append-id", default=None)
         sp.add_argument("--repos", default=None,
@@ -766,17 +782,19 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument("--scaffold", action="store_true",
                             help="place public test cases in the agent workdir")
             sp.add_argument("--agent-framework", default="claude-code",
-                            choices=["claude-code", "openhands"],
+                            choices=["claude-code", "openhands", "codex"],
                             help="agent engine for generation (default: claude-code)")
             sp.set_defaults(reimage=False)
 
     r = sub.add_parser("run", help="generate (and optionally evaluate)")
     common(r, eval_only=False)
-    r.add_argument("--model-name", required=True, help="key in model_list.json")
-    r.add_argument("--user-model-name", default="DeepSeek-V3.2",
-                   choices=["Qwen3.5-4B", "Gemini-3.1-Flash-Lite", "DeepSeek-V3.2"],
+    r.add_argument("--model-name", required=True,
+                   help="key in model_list.json, or a run label for Codex CLI")
+    r.add_argument("--user-model-name", default=None,
+                   choices=["Qwen3.8-Flash", "Gemini-3.1-Flash-Lite", "DeepSeek-V3.2"],
                    help="User Agent (Oracle) model; synced to the User Agent at "
-                        "init so it binds the model to the append_id (default: DeepSeek-V3.2)")
+                        "init so it binds the model to the append_id "
+                        "(default: Qwen3.8-Flash for Codex, DeepSeek-V3.2 otherwise)")
     r.add_argument("--no-eval", dest="eval", action="store_false")
     r.set_defaults(eval=True, only_eval=False)
 
@@ -790,6 +808,9 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.only_eval and not args.append_id:
         raise SystemExit("eval requires --append-id")
+    if not args.only_eval and args.user_model_name is None:
+        args.user_model_name = ("Qwen3.8-Flash" if args.agent_framework == "codex"
+                                else "DeepSeek-V3.2")
     asyncio.run(run_async(args))
 
 

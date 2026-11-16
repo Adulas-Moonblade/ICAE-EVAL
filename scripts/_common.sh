@@ -35,10 +35,10 @@ USER_EVAL_PORT="${USER_EVAL_PORT:-50003}"
 
 # Experiment defaults (task scripts may override).
 USER_MODEL_NAME="${USER_MODEL_NAME:-DeepSeek-V3.2}"
-CRITIC_MODEL_NAME="${CRITIC_MODEL_NAME:-Deepseek-V4-Flash}"
+CRITIC_MODEL_NAME="${CRITIC_MODEL_NAME:-Deepseek-V4.1-Flash}"
 QUERY_COUNT="${QUERY_COUNT:-16}"
 
-# Agent-under-test framework: claude-code (default) | openhands
+# Agent-under-test framework: claude-code (default) | openhands | codex
 AGENT_FRAMEWORK="${AGENT_FRAMEWORK:-claude-code}"
 
 # Single entry point to the orchestrator. First arg is the subcommand (run|eval),

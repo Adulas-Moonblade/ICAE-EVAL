@@ -26,4 +26,5 @@ user_agent/prd_json_medium/
 results/
 user_agent/logs/
 user_agent/state/
+user_agent/user_model.local.json
 fuzzy_prds*@*/

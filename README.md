@@ -26,7 +26,7 @@ ICAE-Bench gives a coding agent a deliberately fuzzy Product Requirement Documen
 
 - **Real-world scope:** 480 anonymized tasks across 12 programming languages.
 - **Interactive requirements:** answers come from hidden ground truth rather than improvised model responses.
-- **Multiple agent runtimes:** Claude Code by default, with optional OpenHands support.
+- **Multiple agent runtimes:** Claude Code by default, with optional OpenHands and Codex CLI support.
 - **Four-part scoring:** dynamic tests, structural similarity, critic review, and interaction quality.
 
 
@@ -70,7 +70,13 @@ Replace the `<...>` placeholders only for the models you plan to use.
 | `model_list.json` → `Critic Model` | Reviewer used by agentic scoring |
 | `user_agent/user_model.json` | Oracle that answers clarification questions |
 
-Model names passed to the runner are the JSON keys, such as `Opus-4.8`, `GLM-5.1`, or `GPT-5.5`.
+The default Critic is `Deepseek-V4.1-Flash`. Its `OPENAI_MODEL` is
+`deepseek-v4.1-flash`, and `OPENAI_CREDENTIALS_FROM_USER_MODEL` loads the OpenAI
+endpoint and API key from the `Qwen3.8-Flash` Oracle entry at runtime. The two
+roles use different model IDs with the same gateway credentials; the key is not
+duplicated in `model_list.json`.
+
+For Claude Code and OpenHands, model names passed to the runner are JSON keys, such as `Opus-4.8`, `GLM-5.1`, or `GPT-5.5`. Codex CLI accepts a run label without a registry entry.
 
 #### Claude Code user settings
 
@@ -120,8 +126,19 @@ The default command performs a one-repository smoke test with `Opus-4.8`. It use
 | Use a different Oracle model | `USER_MODEL_NAME=Gemini-3.1-Flash-Lite ./run.sh Opus-4.8` |
 | Use a remote Oracle | `USER_HOST=10.0.0.8 ./run.sh Opus-4.8` |
 | Run with OpenHands | `AGENT_FRAMEWORK=openhands ./run.sh GPT-5.5` |
+| Run with Codex CLI | `./run.sh Codex-config --agent-framework codex` |
 
 > A 50-task run can make many model calls and take a long time. Start with the default smoke test.
+
+#### Codex CLI
+
+Install and configure Codex CLI before the run. The Codex runner calls `codex exec` and uses the CLI's existing `~/.codex/config.toml` provider/model and `~/.codex/auth.json` authentication. It does not read `ANTHROPIC_*` or `OPENHANDS_*` endpoints from `model_list.json`. The `Codex-config` name in the command above is an experiment label; it need not be in `model_list.json`. To override only the CLI model for an experiment, add `"Codex-config": {"CODEX_MODEL": "your-model-id"}` under `Tested Model`; provider routing and authentication still come from Codex CLI.
+
+The Oracle is independent of the coding agent. For Codex runs its default is `Qwen3.8-Flash`; configure that key in `user_agent/user_model.json` before running, or pass `--user-model-name` to choose another configured Oracle.
+
+Codex writes its event stream to `results/<append_id>/trajectory/<alias>.jsonl` and a readable log beside it. Token counts come from Codex's `turn.completed` usage, including cached input tokens. Codex CLI does not report a cost or a model-iteration count, so `cost_usd` stays `0` and `num_turns` counts the top-level `exec` turn. `--max-turns` cannot limit Codex's internal model iterations; use `--timeout` to bound a run. The runner uses the CLI's unattended permission bypass so it can execute the benchmark's Docker commands; run it on an isolated benchmark host.
+
+For course experiments, the Codex runner appends a host-command scope reminder and watches command-start events for obvious attempts to read benchmark answers or credentials, or to control other Docker containers. It stops generation with `scope_violation:<rule>` and records `scope.violation` in the trajectory JSONL when it sees one. This is a best-effort check: commands can begin before their events reach the runner, and the unattended CLI still has host access. Review the full trajectory before treating a score as uncontaminated.
 
 ## 🔍 How It Works
 
@@ -183,7 +200,7 @@ Start the Oracle separately, then run:
   --difficulty normal \
   --agent-framework claude-code \
   --user-model-name DeepSeek-V3.2 \
-  --critic-model-name Deepseek-V4-Flash \
+  --critic-model-name Deepseek-V4.1-Flash \
   --query-count 16 \
   --concurrency 4 \
   --user-host 127.0.0.1
@@ -278,11 +295,12 @@ Use `normal`, `medium`, or `easy` instead of `all` to regenerate one tree.
 | `MODEL_NAME` | Default tested-model key used by `run.sh` |
 | `RUN_LIMIT` | Repository limit used by `run.sh`; defaults to `1` |
 | `CONCURRENCY` | Parallel repository count |
-| `AGENT_FRAMEWORK` | `claude-code` or `openhands` |
+| `AGENT_FRAMEWORK` | `claude-code`, `openhands`, or `codex` |
 | `USER_HOST` | Oracle host |
 | `USER_MODEL_NAME` | Oracle model key |
 | `CRITIC_MODEL_NAME` | Critic model key |
 | `ICAE_CLAUDE_CLI` | Custom path to the Claude Code CLI |
+| `ICAE_CODEX_CLI` | Custom path to the Codex CLI |
 | `ICAE_DOCKER_LANG_DIR` | Language-image directory |
 | `ICAE_GOLDEN_REPOS_DIR` | Golden-source directory |
 | `ICAE_RCB_TESTS_DIR` | Authoritative-test directory |

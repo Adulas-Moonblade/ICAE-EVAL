@@ -1,7 +1,7 @@
 """Agentic Evaluation — metric group (c) of task.md.
 
 Runs the **Critic Model** (model_list.json['Critic Model'], default
-"Deepseek-V4-Flash") as a static code reviewer that compares the GOLDEN original
+"Deepseek-V4.1-Flash") as a static code reviewer that compares the GOLDEN original
 source against the generated tree and emits three INDEPENDENT 0-1 scores into
 subjective.json:
 
@@ -12,15 +12,16 @@ subjective.json:
 semantic_similarity is its own standalone score (kept separate from
 api_similarity) per the 2026-06-16 decision.
 
-Performance: the critic is a SINGLE Messages-API call with the in-scope source
+Performance: the critic is a SINGLE API call with the in-scope source
 pre-packed into the prompt and `tool_choice` forcing the `submit_review` tool, so
-the three scores come back as a guaranteed, schema-validated JSON object — no
+the three scores come back as a structured JSON object — no
 multi-turn agent loop, no filesystem exploration, no regex scraping of free text.
 """
 import json
 from pathlib import Path
 
 from anthropic import AsyncAnthropic, APIStatusError, APIError
+from openai import AsyncOpenAI, APIStatusError as OpenAIStatusError, APIError as OpenAIError
 
 from . import config as C
 from . import structural as struct
@@ -187,6 +188,61 @@ def _classify(status_code: int | None) -> str:
     return "retry"  # 429, 5xx, network/timeout -> cool down and retry
 
 
+def _openai_credentials(entry: dict) -> tuple[str, str]:
+    """Resolve a shared Oracle endpoint without copying its key to model_list.json."""
+    source = entry.get("OPENAI_CREDENTIALS_FROM_USER_MODEL")
+    if source:
+        configs = C.load_user_models().get(source, [])
+        configs = configs if isinstance(configs, list) else [configs]
+        matched = next((cfg for cfg in configs if isinstance(cfg, dict)
+                        and cfg.get("api_type") == "openai"
+                        and cfg.get("base_url") and cfg.get("api_key")), None)
+        if matched is None:
+            raise ValueError(f"no OpenAI endpoint configured for user model {source!r}")
+        return matched["base_url"], matched["api_key"]
+    if not entry.get("OPENAI_BASE_URL") or not entry.get("OPENAI_API_KEY"):
+        raise ValueError("OpenAI critic needs OPENAI_BASE_URL and OPENAI_API_KEY")
+    return entry["OPENAI_BASE_URL"], entry["OPENAI_API_KEY"]
+
+
+async def _call_openai_critic(entry: dict, prompt: str, timeout: float):
+    """Call an OpenAI-compatible critic with the same forced score tool."""
+    try:
+        base_url, api_key = _openai_credentials(entry)
+    except ValueError as exc:
+        return "dead", None, str(exc)
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+    try:
+        response = await client.chat.completions.create(
+            model=entry["OPENAI_MODEL"], max_tokens=1500,
+            tools=[{"type": "function", "function": {
+                "name": SCORE_TOOL["name"],
+                "description": SCORE_TOOL["description"],
+                "parameters": SCORE_TOOL["input_schema"],
+            }}],
+            tool_choice={"type": "function", "function": {"name": SCORE_TOOL["name"]}},
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except OpenAIStatusError as exc:
+        return _classify(exc.status_code), None, f"{exc.status_code}: {str(exc)[:120]}"
+    except OpenAIError as exc:
+        return "retry", None, f"apierror: {str(exc)[:120]}"
+    except Exception as exc:  # noqa: BLE001 — network/timeout
+        return "retry", None, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+    choice = response.choices[0] if response.choices else None
+    message = choice.message if choice else None
+    calls = (message.tool_calls or []) if message else []
+    call = next((c for c in calls if c.function.name == SCORE_TOOL["name"]), None)
+    if call is None:
+        return "retry", None, f"no submit_review tool call (finish={choice.finish_reason if choice else None})"
+    try:
+        data = json.loads(call.function.arguments)
+    except (ValueError, TypeError):
+        return "retry", None, "invalid submit_review JSON"
+    return "ok", data, ""
+
+
 async def evaluate_agentic(append_id: str, alias: str,
                            critic: "dict | list[dict] | CriticPool",
                            *, env_mode: str = "", timeout: float = 180) -> dict:
@@ -223,30 +279,37 @@ async def evaluate_agentic(append_id: str, alias: str,
         critic if isinstance(critic, list) else [critic])
 
     async def _call(entry: dict):
-        client = AsyncAnthropic(
-            base_url=entry["ANTHROPIC_BASE_URL"].rstrip("/"),
-            auth_token=entry["ANTHROPIC_AUTH_TOKEN"],
-            timeout=timeout,
-        )
-        try:
-            msg = await client.messages.create(
-                model=entry["ANTHROPIC_MODEL"],
-                max_tokens=1500,
-                tools=[SCORE_TOOL],
-                tool_choice={"type": "tool", "name": "submit_review"},
-                messages=[{"role": "user", "content": prompt}],
+        if entry.get("OPENAI_MODEL"):
+            status, data, error = await _call_openai_critic(entry, prompt, timeout)
+            if status != "ok":
+                return status, None, error
+        else:
+            client = AsyncAnthropic(
+                base_url=entry["ANTHROPIC_BASE_URL"].rstrip("/"),
+                auth_token=entry["ANTHROPIC_AUTH_TOKEN"],
+                timeout=timeout,
             )
-        except APIStatusError as e:
-            return _classify(e.status_code), None, f"{e.status_code}: {str(e)[:120]}"
-        except APIError as e:
-            return "retry", None, f"apierror: {str(e)[:120]}"
-        except Exception as e:  # noqa: BLE001 — network/timeout
-            return "retry", None, f"{type(e).__name__}: {str(e)[:120]}"
+            try:
+                msg = await client.messages.create(
+                    model=entry["ANTHROPIC_MODEL"],
+                    max_tokens=1500,
+                    tools=[SCORE_TOOL],
+                    tool_choice={"type": "tool", "name": "submit_review"},
+                    messages=[{"role": "user", "content": prompt}],
+                )
+            except APIStatusError as e:
+                return _classify(e.status_code), None, f"{e.status_code}: {str(e)[:120]}"
+            except APIError as e:
+                return "retry", None, f"apierror: {str(e)[:120]}"
+            except Exception as e:  # noqa: BLE001 — network/timeout
+                return "retry", None, f"{type(e).__name__}: {str(e)[:120]}"
 
-        data = next((b.input for b in msg.content
-                     if getattr(b, "type", None) == "tool_use"), None)
+            data = next((b.input for b in msg.content
+                         if getattr(b, "type", None) == "tool_use"), None)
+            if data is None:
+                return "retry", None, f"no tool_use (stop={msg.stop_reason})"
         if not isinstance(data, dict):
-            return "retry", None, f"no tool_use (stop={msg.stop_reason})"
+            return "retry", None, "submit_review returned no object"
         scores = {
             "semantic_similarity": _coerce_score(data.get("semantic_similarity")),
             "api_similarity": _coerce_score(data.get("api_similarity")),

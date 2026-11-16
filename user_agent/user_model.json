@@ -25,11 +25,11 @@
         }
     ],
 
-    "Qwen3.5-4B": [
+    "Qwen3.8-Flash": [
         {
             "api_type": "openai",
-            "model_name": "<provider-model-id>",
-            "base_url": "<http://your-openai-compatible-host/v1>",
+            "model_name": "qwen3.8-flash",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "api_key": "<YOUR_API_KEY>"
         }
     ]
