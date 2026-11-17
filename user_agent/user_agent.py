@@ -236,8 +236,11 @@ def parse_reply(text: str) -> dict:
     except Exception:
         return {"reply": raw, "_internal_log": {}, "_parse_error": True}
     if isinstance(obj, dict):
+        obj["_schema_missing_fields"] = [
+            key for key in ("reply", "_internal_log") if key not in obj]
         obj.setdefault("reply", "")
         obj.setdefault("_internal_log", {})
+        obj["_parse_error"] = False  # the parser, not the model, owns this flag
         return obj
     return {"reply": raw, "_internal_log": {}, "_parse_error": True}
 
@@ -254,7 +257,9 @@ class UserAgentSession:
         self.messages.append({"role": "user", "content": question})
         text = _call_with_rr(model, self.system, self.messages)
         self.messages.append({"role": "assistant", "content": text})
-        return parse_reply(text)
+        result = parse_reply(text)
+        result["_raw_response"] = text
+        return result
 
     def close(self) -> None:
         self.messages.clear()

@@ -10,7 +10,7 @@ from main import _calc_repo_stats
 
 
 class UserAgentStatsTests(unittest.TestCase):
-    def test_parse_errors_count_as_fallback_once_per_turn(self):
+    def test_fallback_rate_uses_only_model_fallback_flag(self):
         entries = [
             {"turn": 1, "parse_error": True},
             {"turn": 2, "fallback_triggered": True},
@@ -26,8 +26,8 @@ class UserAgentStatsTests(unittest.TestCase):
             stats = _calc_repo_stats("a" * 32, log_file, 5, "test-model")
 
         self.assertEqual(stats["turns_used"], 4)
-        self.assertEqual(stats["fallbacks"], 3)
-        self.assertEqual(stats["fallback_rate"], 75.0)
+        self.assertEqual(stats["fallbacks"], 2)
+        self.assertEqual(stats["fallback_rate"], 50.0)
 
 
 if __name__ == "__main__":

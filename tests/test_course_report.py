@@ -9,10 +9,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from harness.course_report import PAIR_FIELDS, RUN_FIELDS, _oracle_log, _run_row, main, paired
+from harness.course_report import (PAIR_FIELDS, RUN_FIELDS, _oracle_log, _run_row,
+                                   archive_batch, main, paired)
 
 
 class CourseReportTests(unittest.TestCase):
+    def test_invalid_oracle_summary_does_not_require_parsed_summary_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "summary.json"
+            source.write_text("{}")
+            append_id = "a" * 32
+            batch = {"batch_id": "batch", "repo": "realcode@005", "groups": {
+                "B3": {"append_id": append_id, "strategy": "free",
+                       "requirements": {"status": "success"},
+                       "requirements_summary_error": "ValueError: invalid JSON"}}}
+            output = root / "export"
+            output.mkdir()
+            manifest = archive_batch(batch, source, root, output)
+        self.assertFalse(any(item["archive_path"].endswith("requirements_output.json")
+                             for item in manifest["missing"]))
+
     def test_overall_uses_framework_native_and_enhanced_without_public(self):
         objective = {"public_visible": {"passed": 6, "total": 6},
                      "hidden": {"passed": 6, "total": 6},
@@ -121,6 +138,27 @@ class CourseReportTests(unittest.TestCase):
                         "confirmed_questions": 1, "fallback_count": 0,
                         "oracle_response_length": 3}, issues)
             self.assertIn("oracle_relay_service_count_mismatch", issues)
+
+    def test_new_course_report_counts_fallback_as_forwarded_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            append_id = "b" * 32
+            directory = root / append_id
+            directory.mkdir()
+            entries = [
+                {"question": "known?", "answer": "yes", "fallback_triggered": False},
+                {"question": "unknown?", "answer": "unknown", "fallback_triggered": True},
+            ]
+            (directory / "oracle_service.jsonl").write_text(
+                "".join(json.dumps(entry) + "\n" for entry in entries))
+            issues = []
+            chars, _ = _oracle_log(root, append_id, {
+                "actual_questions": 2, "confirmed_questions": 1,
+                "forwarded_questions": 2, "fallback_count": 1,
+                "oracle_response_length": 10}, issues)
+        self.assertEqual(chars, 10)
+        self.assertNotIn("oracle_question_counts_mismatch", issues)
+        self.assertNotIn("oracle_response_length_mismatch", issues)
 
     def test_single_batch_export_copies_only_evidence_and_records_missing_retry_file(self):
         with tempfile.TemporaryDirectory() as tmp:

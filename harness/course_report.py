@@ -48,7 +48,8 @@ configuration, input fingerprints, all group metrics, and retry history.
   A/D have zero clarification cost. `actual_questions` counts self-answered
   questions for A′ and Oracle requests for B/C; only B/C represent external
   interactions. `constraint_coverage_pct` and `fallback_rate_pct` apply to B/C
-  and use the Oracle Stats values. Raw Oracle logs are retained to check counts.
+  and use the Oracle Stats values. Every successful Oracle reply, including a
+  Fallback, is forwarded to coding. Raw Oracle logs are retained to check counts.
 - `pairs.csv`: selected within-batch comparisons. Every `delta_*` is right group
   minus left group. Blank values mean the metric does not apply or is unavailable.
   Compare only rows with `study_ready=True` for formal analysis.
@@ -58,7 +59,9 @@ configuration, input fingerprints, all group metrics, and retry history.
   digests, and expected files that could not be copied.
 - `groups/`: original settings, Codex JSONL trajectories, requirements output,
   Oracle logs where applicable, coding `start.md`, objective score, and evaluation
-  build logs. Attempts have separate subdirectories.
+  build logs. Attempts have separate subdirectories. If a B/C requirements
+  summary is invalid, `summary.json` records `requirements_summary_error` and
+  the parsed `requirements_output.json` is absent; the trajectory remains.
 
 `total_codex_tokens` is clarification plus coding tokens, including cached input
 tokens already counted by Codex. Oracle model tokens are excluded. `total_time_s`
@@ -127,17 +130,23 @@ def _oracle_log(results_root: Path, append_id: str, row: dict,
                 issues.append("oracle_relay_service_count_mismatch")
         except (OSError, json.JSONDecodeError):
             issues.append("invalid_oracle_relay_log")
-    fallback = lambda e: bool(e.get("fallback_triggered") or e.get("parse_error"))
+    forwarded = row.get("forwarded_questions")
+    fallback = (lambda e: bool(e.get("fallback_triggered")) if forwarded is not None
+                else bool(e.get("fallback_triggered") or e.get("parse_error")))
     confirmed = [e for e in entries if not fallback(e)]
     observed = (len(entries), len(confirmed), len(entries) - len(confirmed))
     recorded = (row.get("actual_questions"), row.get("confirmed_questions"),
                 row.get("fallback_count"))
     if observed != recorded:
         issues.append("oracle_question_counts_mismatch")
-    response_chars = sum(len(str(e.get("answer") or "")) for e in confirmed)
+    if forwarded is not None and forwarded != len(entries):
+        issues.append("oracle_forwarded_count_mismatch")
+    # Older course runs filtered Fallback answers before coding.
+    forwarded_entries = entries if forwarded is not None else confirmed
+    response_chars = sum(len(str(e.get("answer") or "")) for e in forwarded_entries)
     if response_chars != row.get("oracle_response_length"):
         issues.append("oracle_response_length_mismatch")
-    triggered = {constraint for e in entries if not fallback(e)
+    triggered = {constraint for e in forwarded_entries
                  for constraint in e.get("triggers_hit", [])}
     per_query = round(len(triggered) / len(entries), 4) if entries else None
     return response_chars, per_query
@@ -174,6 +183,7 @@ def _run_row(batch: dict, group: str, row: dict, source: Path,
               "question_budget": row.get("question_budget"),
               "actual_questions": row.get("actual_questions"),
               "confirmed_questions": row.get("confirmed_questions"),
+              "forwarded_questions": row.get("forwarded_questions"),
               "fallback_count": row.get("fallback_count"),
               "self_reported_questions": row.get("self_reported_questions"),
               "oracle_log_mismatch": row.get("oracle_log_mismatch"),
@@ -377,7 +387,9 @@ def archive_batch(batch: dict, source: Path, results_root: Path, output_dir: Pat
                 if log.is_file() or status not in (None, "pre_satisfied"):
                     files.append((log, target / "trajectory" / log.name, final and status != "pre_satisfied"))
             requirements_output = base / "requirements_output.json"
-            if requirements_output.is_file() or (final and required_status == "success"):
+            if requirements_output.is_file() or (
+                    final and required_status == "success"
+                    and not row.get("requirements_summary_error")):
                 files.append((requirements_output, target / requirements_output.name,
                               final and required_status == "success"))
             if row.get("strategy") in ("free", "risk"):

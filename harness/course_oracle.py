@@ -117,7 +117,7 @@ class OracleRelay:
                             with relay._lock:
                                 relay.fatal = f"oracle_error: {status.get('error', 'unknown')}"
                         internal = status.get("internal_log") or {}
-                        fallback = bool(internal.get("fallback_triggered") or status.get("parse_error"))
+                        fallback = bool(internal.get("fallback_triggered"))
                         public = {"data": raw.get("data", ""),
                                   "status": {"ok": bool(status.get("ok")),
                                              "remaining": status.get("remaining"),
@@ -180,7 +180,7 @@ class OracleRelay:
 
 
 def confirmed_questions(events: list[dict]) -> tuple[list[dict], int, int]:
-    """Return public confirmed Q&A, request count, and fallback count."""
+    """Return every successful Q&A, request count, and flagged fallback count."""
     questions, requested, fallbacks = [], 0, 0
     for event in events:
         raw = event.get("response") or {}
@@ -189,24 +189,22 @@ def confirmed_questions(events: list[dict]) -> tuple[list[dict], int, int]:
             continue
         requested += 1
         internal = status.get("internal_log") or {}
-        if internal.get("fallback_triggered") or status.get("parse_error"):
+        if internal.get("fallback_triggered"):
             fallbacks += 1
-            continue
         questions.append({"question": event["request"]["question"],
                           "answer": raw.get("data", ""), "source": "oracle"})
     return questions, requested, fallbacks
 
 
 def service_questions(entries: list[dict]) -> tuple[list[dict], int, int]:
-    """Extract confirmed requirements from the Oracle service's own JSONL."""
+    """Forward every successful Oracle reply from the trusted service log."""
     questions, requested, fallbacks = [], 0, 0
     for entry in entries:
         if "answer" not in entry:  # rejected over-budget calls are not turns
             continue
         requested += 1
-        if entry.get("fallback_triggered") or entry.get("parse_error"):
+        if entry.get("fallback_triggered"):
             fallbacks += 1
-            continue
         questions.append({"question": entry.get("question", ""),
                           "answer": entry.get("answer", ""), "source": "oracle"})
     return questions, requested, fallbacks

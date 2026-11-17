@@ -18,7 +18,7 @@ import requests
 from harness import config as C
 from harness.course_experiment import (GROUPS, _attempt, _coding_prd, _overall,
                                        _phase, _requirements_prompt, build_parser, run)
-from harness.course_oracle import OracleRelay, service_questions
+from harness.course_oracle import OracleRelay, confirmed_questions, service_questions
 from harness.runner_common import AgentResult
 
 
@@ -40,24 +40,43 @@ class CourseDataTests(unittest.TestCase):
         self.assertIn("Wait for its full answer", prompt)
         self.assertIn("public_test_cases/", prompt)
 
-    def test_coding_prd_contains_only_confirmed_items(self):
+    def test_coding_prd_contains_oracle_replies(self):
         q = [{"question": "format?", "answer": "JSON", "source": "oracle"}]
         self.assertEqual(_coding_prd("original", q, "direct"), "original")
         self.assertEqual(_coding_prd("detailed", q, "detailed"), "detailed")
         self.assertEqual(json.loads(_coding_prd("original", q, "free").split(
-            "## Confirmed Oracle clarifications\n\n", 1)[1])["questions"], q)
+            "## Oracle replies\n\n", 1)[1])["questions"], q)
         self.assertEqual(_overall({"hidden": {"passed": 1, "total": 2},
                                    "enhanced": {"passed": 1, "total": 2}}), 0.5)
         self.assertEqual(_overall({"public_visible": {"passed": 6, "total": 6},
                                    "hidden": {"passed": 6, "total": 6},
                                    "enhanced": {"passed": 19, "total": 39}}), 0.5556)
 
-    def test_oracle_service_entries_exclude_fallback(self):
+    def test_oracle_service_entries_forward_fallback_and_parse_error(self):
         entries = [{"question": "a", "answer": "yes", "fallback_triggered": False},
                    {"question": "b", "answer": "fallback", "fallback_triggered": True},
+                   {"question": "d", "answer": "malformed original", "parse_error": True},
                    {"question": "c", "error": "max_interactions_reached"}]
         self.assertEqual(service_questions(entries),
-                         ([{"question": "a", "answer": "yes", "source": "oracle"}], 2, 1))
+                         ([{"question": "a", "answer": "yes", "source": "oracle"},
+                           {"question": "b", "answer": "fallback", "source": "oracle"},
+                           {"question": "d", "answer": "malformed original",
+                            "source": "oracle"}], 3, 1))
+
+    def test_relay_entries_keep_fallback_answer(self):
+        events = [
+            {"request": {"question": "unknown?"}, "response": {
+                "data": "not specified", "status": {"ok": True,
+                    "internal_log": {"fallback_triggered": True}}}},
+            {"request": {"question": "malformed?"}, "response": {
+                "data": "raw reply", "status": {"ok": True, "parse_error": True,
+                    "internal_log": {}}}},
+        ]
+        self.assertEqual(confirmed_questions(events),
+                         ([{"question": "unknown?", "answer": "not specified",
+                            "source": "oracle"},
+                           {"question": "malformed?", "answer": "raw reply",
+                            "source": "oracle"}], 2, 1))
 
     def test_relay_hides_internal_log_and_preserves_raw_response(self):
         class Oracle(BaseHTTPRequestHandler):
@@ -68,6 +87,7 @@ class CourseDataTests(unittest.TestCase):
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 self.server.received = payload
                 response = {"data": "answer", "status": {"ok": True, "remaining": 2,
+                            "parse_error": True,
                             "internal_log": {"triggers_hit": ["secret"]}}}
                 raw = json.dumps(response).encode()
                 self.send_response(200)
@@ -88,6 +108,7 @@ class CourseDataTests(unittest.TestCase):
                                             json={"question": "what?"}, timeout=3).json()
                 self.assertNotIn("internal_log", json.dumps(visible))
                 self.assertEqual(visible["data"], "answer")
+                self.assertFalse(visible["status"]["fallback"])
                 self.assertEqual(upstream.received["task_id"], "realcode@005")
                 self.assertIn("secret", log.read_text())
                 with OracleRelay(append_id="b" * 32, alias="realcode@005",
@@ -235,6 +256,53 @@ class CourseDataTests(unittest.TestCase):
 
 
 class CourseRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oracle_failure_still_exports_private_service_log(self):
+        class Relay:
+            fatal = None
+            port = 12345
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+        async def fail_phase(*_args, **_kwargs):
+            raise RuntimeError("oracle upstream unavailable")
+
+        async def immediate(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        args = SimpleNamespace(user_host="127.0.0.1", user_init_port=50001,
+                               user_query_port=50002, user_eval_port=50003,
+                               user_model_name="Qwen3.8-Flash", model_name="Codex-config",
+                               oracle_timeout=180, eval=False)
+        entry = {"question": "known?", "answer": "raw answer",
+                 "parse_error": True, "raw_response": "raw answer"}
+        append_id = "a" * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            (results / append_id).mkdir()
+            with patch.object(C, "RESULTS", results), \
+                 patch("harness.course_experiment.OracleRelay", Relay), \
+                 patch("harness.course_experiment._phase", side_effect=fail_phase), \
+                 patch("harness.course_experiment.asyncio.to_thread", side_effect=immediate), \
+                 patch("harness.course_experiment.ua.mint_append_id", return_value=append_id), \
+                 patch("harness.course_experiment.ua.init_settings"), \
+                 patch("harness.course_experiment.ua.update_repo_status"), \
+                 patch("harness.course_experiment.ua.fetch_interaction_log",
+                       return_value=[entry]):
+                row = await _attempt("realcode@005", "B3", "free", 3,
+                                     "fuzzy", "detailed", Path("image.tar"),
+                                     args, {}, "batch")
+            saved = [json.loads(line) for line in (
+                results / append_id / "oracle_service.jsonl").read_text().splitlines()]
+        self.assertEqual(row["status"], "infrastructure_error")
+        self.assertEqual(saved, [entry])
+
     async def test_requirements_phase_receives_public_scaffold(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -264,6 +332,9 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                                  "feature.json").is_file())
                 return AgentResult(status="success")
 
+            async def immediate(func, *args, **kwargs):
+                return func(*args, **kwargs)
+
             args = SimpleNamespace(proxy=None, proxy_fallback_file=None,
                                    requirements_timeout=60, coding_timeout=60)
             with patch.object(C, "REPOS_DIR", root / "data"), \
@@ -272,6 +343,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(C, "code_path", return_value=workdir), \
                  patch("harness.course_experiment.docker_env.provision",
                        side_effect=fake_provision), \
+                 patch("harness.course_experiment.asyncio.to_thread", side_effect=immediate), \
                  patch("harness.course_experiment.run_agent", side_effect=fake_agent):
                 result, *_ = await _phase("prompt", alias="realcode@005",
                                           append_id="a" * 32, phase="requirements",
@@ -280,13 +352,17 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.status, "success")
             self.assertIn("teardown", seen)
 
-    async def test_b_group_coding_receives_only_confirmed_service_answers(self):
+    async def test_b_group_coding_receives_all_service_answers(self):
         class Relay:
             port = 12345
             fatal = None
             events = [
                 {"request": {"question": "confirmed?"}, "response": {
                     "data": "yes", "status": {"ok": True, "internal_log": {}}}},
+                {"request": {"question": "known and unknown?"}, "response": {
+                    "data": "Known rule; other behavior unspecified.", "status": {
+                    "ok": True, "internal_log": {"triggers_hit": ["C004"],
+                                                  "fallback_triggered": False}}}},
                 {"request": {"question": "fallback?"}, "response": {
                     "data": "do not use", "status": {"ok": True,
                     "internal_log": {"fallback_triggered": True}}}}]
@@ -302,6 +378,9 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
 
         entries = [{"question": "confirmed?", "answer": "yes",
                     "fallback_triggered": False},
+                   {"question": "known and unknown?",
+                    "answer": "Known rule; other behavior unspecified.",
+                    "triggers_hit": ["C004"], "fallback_triggered": False},
                    {"question": "fallback?", "answer": "do not use",
                     "fallback_triggered": True}]
         args = SimpleNamespace(user_host="127.0.0.1", user_init_port=50001,
@@ -315,12 +394,16 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
             return AgentResult(status="success", input_tokens=10,
                                output_tokens=5), 2.0, Path("unused.log"), "base-image"
 
+        async def immediate(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
         with tempfile.TemporaryDirectory() as tmp:
             results = Path(tmp)
             (results / ("a" * 32)).mkdir()
             with patch.object(C, "RESULTS", results), \
                  patch("harness.course_experiment.OracleRelay", Relay), \
                  patch("harness.course_experiment._phase", side_effect=fake_phase), \
+                 patch("harness.course_experiment.asyncio.to_thread", side_effect=immediate), \
                  patch("harness.course_experiment._json_message",
                        return_value={"questions": []}), \
                  patch("harness.course_experiment.ua.mint_append_id", return_value="a" * 32), \
@@ -335,11 +418,107 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                                      args, {}, "batch")
         self.assertEqual(row["status"], "success", row)
         self.assertEqual((row["actual_questions"], row["fallback_count"],
-                          row["confirmed_questions"]), (2, 1, 1))
+                          row["confirmed_questions"]), (3, 1, 2))
+        self.assertEqual(row["forwarded_questions"], 3)
         self.assertEqual([p[0] for p in phase_inputs], ["requirements", "coding"])
         self.assertIn('"answer": "yes"', phase_inputs[1][1])
-        self.assertNotIn("do not use", phase_inputs[1][1])
+        self.assertIn("Known rule; other behavior unspecified.", phase_inputs[1][1])
+        self.assertIn("do not use", phase_inputs[1][1])
+        self.assertTrue(row["oracle_log_mismatch"])  # audit hint, not a run failure
+        self.assertEqual(row["requirements_output_authority"], "audit_summary_only")
         self.assertEqual(row["total_codex_tokens"], 30)
+
+    async def test_b_group_continues_when_audit_summary_is_invalid(self):
+        class Relay:
+            port = 12345
+            fatal = None
+            events = [{"request": {"question": "known?"}, "response": {
+                "data": "known answer", "status": {"ok": True, "internal_log": {}}}}]
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                pass
+
+        args = SimpleNamespace(user_host="127.0.0.1", user_init_port=50001,
+                               user_query_port=50002, user_eval_port=50003,
+                               user_model_name="Qwen3.8-Flash", model_name="Codex-config",
+                               oracle_timeout=180, eval=False)
+
+        async def immediate(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        for bad_summary in (ValueError("invalid JSON"), {"other": []}):
+            with self.subTest(bad_summary=bad_summary), tempfile.TemporaryDirectory() as tmp:
+                append_id = "a" * 32
+                results = Path(tmp)
+                (results / append_id).mkdir()
+                phase_inputs = []
+
+                async def fake_phase(prompt, **kwargs):
+                    phase_inputs.append((kwargs["phase"], kwargs["prd"]))
+                    return AgentResult(status="success", input_tokens=10,
+                                       output_tokens=5), 2.0, Path("unused.log"), "base-image"
+
+                with patch.object(C, "RESULTS", results), \
+                     patch("harness.course_experiment.OracleRelay", Relay), \
+                     patch("harness.course_experiment._phase", side_effect=fake_phase), \
+                     patch("harness.course_experiment.asyncio.to_thread", side_effect=immediate), \
+                     patch("harness.course_experiment._json_message", side_effect=(
+                         bad_summary if isinstance(bad_summary, Exception) else None),
+                         return_value=(bad_summary if isinstance(bad_summary, dict) else None)), \
+                     patch("harness.course_experiment.ua.mint_append_id", return_value=append_id), \
+                     patch("harness.course_experiment.ua.init_settings"), \
+                     patch("harness.course_experiment.ua.update_repo_status"), \
+                     patch("harness.course_experiment.ua.fetch_interaction_log",
+                           return_value=[{"question": "known?", "answer": "known answer"}]), \
+                     patch("harness.course_experiment.ua.fetch_interaction_stats",
+                           return_value={"ok": True}):
+                    row = await _attempt("realcode@005", "B3", "free", 3,
+                                         "fuzzy", "detailed", Path("image.tar"),
+                                         args, {}, "batch")
+                self.assertEqual(row["status"], "success", row)
+                self.assertEqual([phase for phase, _ in phase_inputs],
+                                 ["requirements", "coding"])
+                self.assertIn("known answer", phase_inputs[1][1])
+                self.assertIn("requirements_summary_error", row)
+                self.assertTrue(row["oracle_log_mismatch"])
+                self.assertFalse((results / append_id / "requirements_output.json").exists())
+
+    async def test_self_group_still_requires_valid_summary(self):
+        args = SimpleNamespace(user_host="127.0.0.1", user_init_port=50001,
+                               user_model_name="Qwen3.8-Flash", model_name="Codex-config",
+                               eval=False)
+        phases = []
+
+        async def fake_phase(prompt, **kwargs):
+            phases.append(kwargs["phase"])
+            return AgentResult(status="success", input_tokens=1,
+                               output_tokens=1), 1.0, Path("unused.log"), "base-image"
+
+        async def immediate(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            append_id = "a" * 32
+            (Path(tmp) / append_id).mkdir()
+            with patch.object(C, "RESULTS", Path(tmp)), \
+                 patch("harness.course_experiment._phase", side_effect=fake_phase), \
+                 patch("harness.course_experiment.asyncio.to_thread", side_effect=immediate), \
+                 patch("harness.course_experiment._json_message",
+                       return_value={"other": []}), \
+                 patch("harness.course_experiment.ua.mint_append_id", return_value=append_id), \
+                 patch("harness.course_experiment.ua.init_settings"), \
+                 patch("harness.course_experiment.ua.update_repo_status"):
+                row = await _attempt("realcode@005", "A′3", "self", 3,
+                                     "fuzzy", "detailed", Path("image.tar"),
+                                     args, {}, "batch")
+        self.assertEqual(row["status"], "generation_error")
+        self.assertEqual(phases, ["requirements"])
 
     async def test_requires_one_repo_and_runs_eight_groups(self):
         args = SimpleNamespace(repo="realcode@005,realcode@006", model_name="Codex-config",

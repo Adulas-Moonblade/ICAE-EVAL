@@ -7,6 +7,7 @@
 - **唯一信息来源**：每个任务对应的 `prd_json/<username>__<repo_name>.json` 里的 `oracle_data`（`hidden_constraints` / `context_pointers` / `golden_api_signature` / `fallback_response`）。
 - **不读真实仓库**：所以 User Agent 没有任何工具（纯对话），用 `anthropic` 的 Messages API 实现，而不是 Agent SDK —— Agent SDK 自带的 Claude Code 身份会把 Oracle 人设冲掉。
 - **严格 JSON 输出**：模型每轮输出 `{"_internal_log": {...}, "reply": "..."}`；只有 `reply` 会回给被测 Agent，`_internal_log` 留作内部计分。
+- **Fallback 与日志**：提示词要求仅在整条问题完全没有已知答案时使用 Fallback；混合问题应保留已知答案。服务端每轮只调用一次模型；解析失败时转交原始文本并单独记录 `parse_error`。字段缺失或类型异常只做不阻断回答的兜底，并在服务日志的 `schema_errors` 中记录。日志保留模型的 `raw_response`；Fallback Rate 仅根据模型输出的有效 `fallback_triggered` 布尔值计算。
 
 ## 目录结构
 

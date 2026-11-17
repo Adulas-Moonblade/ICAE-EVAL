@@ -18,6 +18,7 @@ Run:  python main.py
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -123,6 +124,41 @@ async def _append_log(task_id: str, append_id: str, entry: dict) -> None:
             f.write(line)
 
 
+def _safe_reply_fields(result: dict) -> tuple[str, dict, list[str]]:
+    """Keep a single Oracle answer usable while recording malformed field types."""
+    errors = list(result.get("_schema_missing_fields", []))
+    reply = result.get("reply")
+    if not isinstance(reply, str):
+        errors.append("reply")
+        reply = ""
+    raw_log = result.get("_internal_log")
+    if not isinstance(raw_log, dict):
+        errors.append("_internal_log")
+        raw_log = {}
+    ilog = raw_log.copy()
+    if not result.get("_parse_error") and isinstance(result.get("_internal_log"), dict):
+        errors.extend(f"_internal_log.{key}" for key in (
+            "triggers_hit", "fallback_triggered", "api_alignment_triggered",
+            "cheating_attempt_detected", "score_adjustment") if key not in raw_log)
+    hits = ilog.get("triggers_hit", [])
+    if not isinstance(hits, list) or any(not isinstance(hit, str) for hit in hits):
+        errors.append("_internal_log.triggers_hit")
+        hits = [hit for hit in hits if isinstance(hit, str)] if isinstance(hits, list) else []
+    ilog["triggers_hit"] = hits
+    for key in ("fallback_triggered", "api_alignment_triggered", "cheating_attempt_detected"):
+        value = ilog.get(key, False)
+        if type(value) is not bool:
+            errors.append(f"_internal_log.{key}")
+            value = False
+        ilog[key] = value
+    score = ilog.get("score_adjustment", 0)
+    if not (type(score) is int or (type(score) is float and math.isfinite(score))):
+        errors.append("_internal_log.score_adjustment")
+        score = 0
+    ilog["score_adjustment"] = score
+    return reply, ilog, errors
+
+
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 init_app  = FastAPI(title="UserAgent Init")
@@ -208,9 +244,10 @@ async def chat_endpoint(req: Request):
             return {"data": "", "status": {"ok": False,
                                            "error": "max_interactions_reached", "remaining": 0}}
 
-        t0     = time.time()
+        t0 = time.time()
         result = await asyncio.to_thread(record["sess"].ask, question, model=model)
         elapsed = round(time.time() - t0, 3)
+        reply, ilog, schema_errors = _safe_reply_fields(result)
         record["count"] += 1
         remaining = max_interactions - record["count"]
         if remaining <= 0:
@@ -222,8 +259,6 @@ async def chat_endpoint(req: Request):
             record["count"], record["sess"].messages
         )
 
-        ilog  = result.get("_internal_log", {})
-        reply = result.get("reply", "")
         response = {
             "data": reply,
             "status": {
@@ -248,6 +283,8 @@ async def chat_endpoint(req: Request):
             "cheating_attempt_detected": ilog.get("cheating_attempt_detected", False),
             "score_adjustment": ilog.get("score_adjustment", 0),
             "parse_error": result.get("_parse_error", False),
+            "raw_response": result.get("_raw_response", reply),
+            "schema_errors": schema_errors,
         })
 
         return response
@@ -269,8 +306,7 @@ def _calc_repo_stats(append_id: str, log_file: Path, max_interactions: int, mode
     triggered    = set()
     for e in turn_entries:
         triggered.update(e.get("triggers_hit", []))
-    fallbacks   = sum(1 for e in turn_entries
-                      if e.get("fallback_triggered") or e.get("parse_error"))
+    fallbacks   = sum(1 for e in turn_entries if e.get("fallback_triggered"))
     total_score = sum(e.get("score_adjustment", 0) for e in turn_entries)
 
     task_id = log_file.parent.name          # e.g. "realcode@001"

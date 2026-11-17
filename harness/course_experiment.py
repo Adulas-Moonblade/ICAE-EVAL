@@ -73,8 +73,8 @@ def _requirements_prompt(strategy: str, budget: int, relay_url: str | None,
     question = (
         f"You may ask at most {budget} questions of the Oracle. POST JSON "
         f"{{\"question\":\"...\"}} to {relay_url}. The response has data and status "
-        "with remaining and fallback. A fallback consumes one question but is not "
-        "a confirmed requirement. Set the HTTP client timeout to at least "
+        "with remaining and fallback. A fallback consumes one question and says "
+        "the requested detail is unspecified. Set the HTTP client timeout to at least "
         f"{math.ceil(oracle_timeout) + 30} seconds for every request, longer than "
         "the Oracle relay timeout. Ask exactly one question at a time. Wait for "
         "its full answer, then analyze what it resolves and choose the next "
@@ -83,9 +83,10 @@ def _requirements_prompt(strategy: str, budget: int, relay_url: str | None,
         "request while one is pending or repeat a question merely because its "
         "response has not arrived yet. "
         "You may rephrase while budget remains. "
-        "Do not include fallback answers in your final confirmed questions. "
-        "Use source=oracle for confirmed answers. The experiment script uses the "
-        "Oracle interaction record as the authoritative Q&A list.\n"
+        "Keep every successful Oracle reply in your final questions, including "
+        "partial answers and pure fallbacks. Use source=oracle. Your "
+        "final JSON is a non-authoritative summary; the experiment script "
+        "deterministically builds the coding Q&A from the trusted Oracle log.\n"
     )
     if strategy == "risk":
         question += (
@@ -113,9 +114,22 @@ def _workspace_manifest(workdir: Path) -> dict[str, str | None]:
 def _coding_prd(original: str, questions: list[dict], strategy: str) -> str:
     if strategy in ("direct", "detailed"):
         return original
-    title = "Agent assumptions" if strategy == "self" else "Confirmed Oracle clarifications"
+    title = "Agent assumptions" if strategy == "self" else "Oracle replies"
     return (original.rstrip() + f"\n\n## {title}\n\n" +
             json.dumps({"questions": questions}, ensure_ascii=False, indent=2) + "\n")
+
+
+async def _save_oracle_service_log(append_id: str, alias: str, args) -> list[dict]:
+    """Preserve the trusted service log, including parse errors."""
+    entries = await asyncio.to_thread(
+        ua.fetch_interaction_log, append_id, alias,
+        user_host=args.user_host, user_eval_port=args.user_eval_port)
+    log_path = C.RESULTS / append_id / "oracle_service.jsonl"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
+        encoding="utf-8")
+    return entries
 
 
 def _metrics(result, seconds: float) -> dict:
@@ -198,7 +212,7 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
                             "input_tokens": 0, "output_tokens": 0,
                             "total_codex_tokens": 0},
            "actual_questions": 0, "fallback_count": 0,
-           "confirmed_questions": 0}
+           "confirmed_questions": 0, "forwarded_questions": 0}
     questions: list[dict] = []
     original = detailed if strategy == "detailed" else fuzzy
     try:
@@ -219,18 +233,14 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
                                          tar_path=tar_path, args=args, model=model)
                 if relay.fatal:
                     raise RuntimeError(relay.fatal)
-                entries = await asyncio.to_thread(
-                    ua.fetch_interaction_log, append_id, alias,
-                    user_host=args.user_host, user_eval_port=args.user_eval_port)
-                (C.RESULTS / append_id / "oracle_service.jsonl").write_text(
-                    "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries),
-                    encoding="utf-8")
+                entries = await _save_oracle_service_log(append_id, alias, args)
                 questions, count, fallbacks = service_questions(entries)
                 _, relay_count, _ = confirmed_questions(relay.events)
                 if count != relay_count:
                     raise RuntimeError(f"Oracle log count mismatch: service={count}, relay={relay_count}")
                 row.update(actual_questions=count, fallback_count=fallbacks,
-                           confirmed_questions=len(questions),
+                           confirmed_questions=count - fallbacks,
+                           forwarded_questions=len(questions),
                            oracle_response_length=sum(len(q["answer"]) for q in questions))
                 if strategy == "risk":
                     row["risk_decisions"] = [
@@ -247,28 +257,38 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
             if result.status != "success":
                 error = f"requirements phase: {result.detail or result.status}"
                 raise InfrastructureError(error) if result.is_error else RuntimeError(error)
-            output = _json_message(log_path)
-            (C.RESULTS / append_id / "requirements_output.json").write_text(
-                json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-            items = output.get("questions")
-            if not isinstance(items, list):
-                raise ValueError("requirements result must contain a questions list")
-            if strategy == "self":
-                if len(items) > budget:
-                    raise ValueError("invalid self clarification question count")
-                for q in items:
-                    if (not isinstance(q, dict) or q.get("source") != "agent_assumption"
-                            or not isinstance(q.get("question"), str)
-                            or not isinstance(q.get("answer"), str)):
-                        raise ValueError("invalid self clarification item")
-                questions = items
-                row.update(actual_questions=len(items), confirmed_questions=len(items))
+            row["requirements_output_authority"] = (
+                "codex_assumptions" if strategy == "self" else "audit_summary_only")
+            try:
+                output = _json_message(log_path)
+                items = output.get("questions")
+                if not isinstance(items, list):
+                    raise ValueError("requirements result must contain a questions list")
+            except (OSError, ValueError) as exc:
+                if strategy == "self":
+                    raise
+                row["requirements_summary_error"] = f"{type(exc).__name__}: {exc}"
+                row["oracle_log_mismatch"] = True
             else:
-                row["self_reported_questions"] = len(items)
-                reported = [(q.get("question"), q.get("answer")) for q in items
-                            if isinstance(q, dict) and q.get("source") == "oracle"]
-                confirmed = [(q["question"], q["answer"]) for q in questions]
-                row["oracle_log_mismatch"] = reported != confirmed
+                (C.RESULTS / append_id / "requirements_output.json").write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+                if strategy == "self":
+                    if len(items) > budget:
+                        raise ValueError("invalid self clarification question count")
+                    for q in items:
+                        if (not isinstance(q, dict) or q.get("source") != "agent_assumption"
+                                or not isinstance(q.get("question"), str)
+                                or not isinstance(q.get("answer"), str)):
+                            raise ValueError("invalid self clarification item")
+                    questions = items
+                    row.update(actual_questions=len(items), confirmed_questions=len(items),
+                               forwarded_questions=len(items))
+                else:
+                    row["self_reported_questions"] = len(items)
+                    reported = [(q.get("question"), q.get("answer")) for q in items
+                                if isinstance(q, dict) and q.get("source") == "oracle"]
+                    confirmed = [(q["question"], q["answer"]) for q in questions]
+                    row["oracle_log_mismatch"] = reported != confirmed
             if strategy in ("free", "risk") and row["actual_questions"] > budget:
                 raise RuntimeError("Oracle request count exceeded budget")
         coding_prd = _coding_prd(original, questions, strategy)
@@ -308,6 +328,12 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
             ua.update_repo_status(append_id, alias, {"generation": "generation_failed",
                                                      "reason": row["objective"]["error"]})
     except Exception as exc:  # preserve logs and prevent scoring partial code
+        if strategy in ("free", "risk") and not (
+                C.RESULTS / append_id / "oracle_service.jsonl").exists():
+            try:
+                await _save_oracle_service_log(append_id, alias, args)
+            except Exception as log_exc:
+                row["oracle_log_export_error"] = f"{type(log_exc).__name__}: {log_exc}"
         row["status"] = "infrastructure_error" if (
             isinstance(exc, (InfrastructureError, docker_env.DockerError, OSError, RateLimited)) or
             any(x in str(exc).lower() for x in
