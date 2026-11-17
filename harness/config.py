@@ -55,7 +55,7 @@ FUZZY_PRDS = ROOT / "fuzzy_prds"
 FUZZY_PRDS_EASY = ROOT / "fuzzy_prds_easy"  # simplified PRDs, difficulty=easy
 FUZZY_PRDS_MEDIUM = ROOT / "fuzzy_prds_medium"  # mid-detail PRDs, difficulty=medium
 DETAILED_PRDS = ROOT / "detailed_prds"
-# Optional override for the detailed-PRD source dir. Lets a C3-style ablation
+# Optional override for the detailed-PRD source dir. Lets a C2-style ablation
 # (fuzzy_prd + oracle_data, no Oracle) point at detailed_prds_oracle/ without
 # touching the real ground-truth detailed_prds/. Set DETAILED_PRDS_DIR to a dir
 # name (resolved under ROOT) or an absolute path.

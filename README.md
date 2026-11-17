@@ -142,7 +142,7 @@ The development container uses host networking so Codex can reach the local Orac
 
 #### Eight-group course experiment
 
-Run exactly one project per invocation. The command requires `--repo` and executes A, A′3, A′8, B3, B8, C3, C8, and D in order:
+Run exactly one project per invocation. The command requires `--repo` and executes A, A′2, A′6, B2, B6, C2, C6, and D in order:
 
 ```bash
 ./run.sh --course --repo realcode@005
@@ -150,7 +150,9 @@ Run exactly one project per invocation. The command requires `--repo` and execut
 ./run.sh --course --repo realcode@005 --codex-model gpt-6-sol --reasoning-effort medium
 ```
 
-A and D have a recorded requirements phase with zero clarification time. A′3/A′8 form their own assumptions; B/C ask the Oracle through a relay, with 3/8 question budgets. The harness obtains the original Oracle service log for B/C, removes fallback replies from coding input, and saves the complete log on the host. Every group starts coding in a freshly initialized workspace and a new Codex session. Infrastructure retries receive new `append_id` values; failed attempts are retained but are not evaluated. The D input is `detailed_prds_oracle/<alias>/start.md`. Default timeouts are 60 minutes for requirements, 120 minutes for coding, 180 seconds per Oracle request, and 40 minutes per evaluation tier. The 15-minute Codex inactivity limit also applies.
+A and D have a recorded requirements phase with zero clarification time. A′2/A′6 form their own assumptions; B/C ask the Oracle through a relay, with 2/6 question budgets. The harness obtains the original Oracle service log for B/C, forwards all Oracle replies to coding, and saves the complete log on the host. Every group starts coding in a freshly initialized workspace and a new Codex session. Infrastructure retries receive new `append_id` values; failed attempts are retained but are not evaluated. The D input is `detailed_prds_oracle/<alias>/start.md`. Default timeouts are 60 minutes for requirements, 120 minutes for coding, 180 seconds per Oracle request, and 40 minutes per evaluation tier. The 15-minute Codex inactivity limit also applies. Reports still recognize earlier batches recorded with 3/8 budgets under their original group names.
+
+The older `文档.pdf` still describes 3/8 budgets because its editable source is not in this repository. For runs started with this checkout, the 2/6 configuration above is authoritative; revise the PDF before distributing it as the current experiment manual.
 
 Results are indexed by `results/course_runs/<batch_id>/summary.json`. Each group also has its own `results/<append_id>/` with requirements and coding JSONL, Oracle logs, generated code, and `objective.json` under `_eval/<alias>/`. `--no-eval` skips the final objective test. The course entry point uses Fuzzy L1 (`fuzzy_prds/`) and supplies the same public test case scaffold to all eight groups.
 

@@ -10,10 +10,25 @@ from pathlib import Path
 from unittest.mock import patch
 
 from harness.course_report import (PAIR_FIELDS, RUN_FIELDS, _oracle_log, _run_row,
-                                   archive_batch, main, paired)
+                                   archive_batch, collect, main, paired)
 
 
 class CourseReportTests(unittest.TestCase):
+    def test_legacy_budget_batch_keeps_original_group_names_and_pairs(self):
+        old_names = ("A", "A′3", "A′8", "B3", "B8", "C3", "C8", "D")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "summary.json"
+            source.write_text(json.dumps({
+                "batch_id": "old", "repo": "realcode@005",
+                "groups": {name: {"status": "success", "strategy": "direct"}
+                           for name in old_names}}))
+            runs, _ = collect(root, root, sources=[source])
+        self.assertEqual(tuple(row["group"] for row in runs), old_names)
+        self.assertEqual(len(paired(runs)), 18)
+        self.assertIn(("B3", "B8"), {(row["left_group"], row["right_group"])
+                                          for row in paired(runs)})
+
     def test_invalid_oracle_summary_does_not_require_parsed_summary_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -21,7 +36,7 @@ class CourseReportTests(unittest.TestCase):
             source.write_text("{}")
             append_id = "a" * 32
             batch = {"batch_id": "batch", "repo": "realcode@005", "groups": {
-                "B3": {"append_id": append_id, "strategy": "free",
+                "B2": {"append_id": append_id, "strategy": "free",
                        "requirements": {"status": "success"},
                        "requirements_summary_error": "ValueError: invalid JSON"}}}
             output = root / "export"
@@ -63,21 +78,21 @@ class CourseReportTests(unittest.TestCase):
                  "input_fingerprints": {"data": "abc"},
                  "codex_cli_config_sha256": "123"}
         row = {"strategy": "free", "append_id": None, "status": "success",
-               "question_budget": 9, "actual_questions": 3, "fallback_count": 1,
+               "question_budget": 6, "actual_questions": 3, "fallback_count": 1,
                "interaction": {"ok": True, "constraint_coverage": 50.0,
-                               "fallback_rate": 33.3, "budget_usage_rate": 33.3},
+                               "fallback_rate": 33.3, "budget_usage_rate": 50.0},
                "objective": {"hidden": {"passed": 1, "total": 1},
                              "enhanced": {"passed": 1, "total": 1}}}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
-            result = _run_row(batch, "B3", row, path / "summary.json", path, True)
-            missing = _run_row(batch, "B3", {**row, "interaction": {"ok": False}},
+            result = _run_row(batch, "B6", row, path / "summary.json", path, True)
+            missing = _run_row(batch, "B6", {**row, "interaction": {"ok": False}},
                                path / "summary.json", path, True)
-            inconsistent = _run_row(batch, "B3", {**row, "interaction": {
+            inconsistent = _run_row(batch, "B6", {**row, "interaction": {
                 **row["interaction"], "fallback_rate": 30.0,
                 "budget_usage_rate": 40.0}}, path / "summary.json", path, True)
         self.assertEqual(result["fallback_rate_pct"], 33.3)
-        self.assertEqual(result["budget_usage_pct"], 33.3)
+        self.assertEqual(result["budget_usage_pct"], 50.0)
         self.assertNotIn("fallback_rate_mismatch", result["issues"])
         self.assertNotIn("budget_usage_rate_mismatch", result["issues"])
         self.assertIsNone(missing["fallback_rate_pct"])
@@ -114,9 +129,9 @@ class CourseReportTests(unittest.TestCase):
              "oracle_model": "oracle",
              "quality_ready": True, "study_ready": True, "overall_pass_rate": 0.2,
              "total_codex_tokens": 100, "total_time_s": 10, "actual_questions": 0}
-        b = {**a, "group": "B3", "overall_pass_rate": 0.5,
+        b = {**a, "group": "B2", "overall_pass_rate": 0.5,
              "total_codex_tokens": 130, "total_time_s": 15, "actual_questions": 2}
-        result = next(item for item in paired([a, b]) if item["right_group"] == "B3")
+        result = next(item for item in paired([a, b]) if item["right_group"] == "B2")
         self.assertEqual(result["delta_overall_pass_rate"], 0.3)
         self.assertEqual(result["delta_total_codex_tokens"], 30)
         self.assertEqual(result["delta_actual_questions"], 2)
@@ -174,9 +189,9 @@ class CourseReportTests(unittest.TestCase):
                      "model_name": "test", "model": {"CODEX_MODEL": "gpt-6-sol"},
                      "oracle_model": "oracle", "input_fingerprints": {"data": "abc"},
                      "codex_cli_config_sha256": "123",
-                     "groups": {"B3": {
+                     "groups": {"B2": {
                          "append_id": final_id, "strategy": "free", "status": "success",
-                         "question_budget": 3, "actual_questions": 1,
+                         "question_budget": 2, "actual_questions": 1,
                          "confirmed_questions": 1, "fallback_count": 0,
                          "oracle_response_length": 3,
                          "interaction": {"ok": True, "constraint_coverage": 50,
@@ -215,7 +230,7 @@ class CourseReportTests(unittest.TestCase):
                 "answer": "yes", "triggers_hit": ["C001"]}) + "\n")
             (final / "oracle_raw.jsonl").write_text(json.dumps({
                 "response": {"status": {"ok": True}}}) + "\n")
-            (eval_dir / "objective.json").write_text(json.dumps(batch["groups"]["B3"]["objective"]))
+            (eval_dir / "objective.json").write_text(json.dumps(batch["groups"]["B2"]["objective"]))
             for tier in ("public_test_cases", "test_cases", "enhanced_test_cases"):
                 (eval_dir / f".build_log_{tier}.txt").write_text("test output\n")
             outcap = eval_dir / "outcap_test_cases"
@@ -229,7 +244,7 @@ class CourseReportTests(unittest.TestCase):
                 reader = csv.DictReader(stream)
                 self.assertEqual(reader.fieldnames, list(RUN_FIELDS))
                 rows = list(reader)
-            self.assertEqual([r["group"] for r in rows], ["B3"])
+            self.assertEqual([r["group"] for r in rows], ["B2"])
             self.assertEqual(len(RUN_FIELDS), 23)
             self.assertEqual(len(PAIR_FIELDS), 11)
             self.assertNotIn("codex_model", rows[0])

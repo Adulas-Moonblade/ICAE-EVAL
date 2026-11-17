@@ -15,12 +15,25 @@ from .course_experiment import GROUPS
 
 GROUP_NAMES = tuple(group for group, _, _ in GROUPS)
 PAIRS = (
-    ("A", "A′3"), ("A", "A′8"), ("A", "B3"), ("A", "B8"),
-    ("A", "C3"), ("A", "C8"), ("A", "D"),
-    ("A′3", "A′8"), ("A′3", "B3"), ("A′8", "B8"),
-    ("B3", "B8"), ("C3", "C8"), ("B3", "C3"), ("B8", "C8"),
-    ("B3", "D"), ("B8", "D"), ("C3", "D"), ("C8", "D"),
+    ("A", "A′2"), ("A", "A′6"), ("A", "B2"), ("A", "B6"),
+    ("A", "C2"), ("A", "C6"), ("A", "D"),
+    ("A′2", "A′6"), ("A′2", "B2"), ("A′6", "B6"),
+    ("B2", "B6"), ("C2", "C6"), ("B2", "C2"), ("B6", "C6"),
+    ("B2", "D"), ("B6", "D"), ("C2", "D"), ("C6", "D"),
 )
+_LEGACY_LABELS = {"A′2": "A′3", "A′6": "A′8", "B2": "B3", "B6": "B8",
+                  "C2": "C3", "C6": "C8"}
+LEGACY_GROUP_NAMES = tuple(_LEGACY_LABELS.get(group, group) for group in GROUP_NAMES)
+LEGACY_PAIRS = tuple((_LEGACY_LABELS.get(left, left),
+                      _LEGACY_LABELS.get(right, right)) for left, right in PAIRS)
+
+
+def _group_names(groups: dict) -> tuple[str, ...]:
+    """Keep pre-budget-change batches exportable under their recorded names."""
+    legacy_only = set(LEGACY_GROUP_NAMES) - set(GROUP_NAMES)
+    return LEGACY_GROUP_NAMES if legacy_only.intersection(groups) else GROUP_NAMES
+
+
 DELTA_FIELDS = ("overall_pass_rate", "total_codex_tokens", "total_time_s",
                 "actual_questions", "constraint_coverage_pct", "fallback_rate_pct")
 RUN_FIELDS = (
@@ -289,10 +302,11 @@ def collect(course_runs: Path, results_root: Path,
         if repo and batch.get("repo") != repo:
             continue
         groups = batch.get("groups") or {}
-        complete = (set(groups) == set(GROUP_NAMES) and
+        group_names = _group_names(groups)
+        complete = (set(groups) == set(group_names) and
                     all((groups[g] or {}).get("status") in ("success", "generation_failed")
-                        for g in GROUP_NAMES))
-        for group in GROUP_NAMES:
+                        for g in group_names))
+        for group in group_names:
             if group not in groups:
                 continue
             run = _run_row(batch, group, groups[group], source, results_root, complete)
@@ -323,7 +337,8 @@ def paired(runs: list[dict]) -> list[dict]:
         by_batch.setdefault(run["batch_id"], {})[run["group"]] = run
     output = []
     for batch_id, groups in by_batch.items():
-        for left_name, right_name in PAIRS:
+        pairs = LEGACY_PAIRS if _group_names(groups) == LEGACY_GROUP_NAMES else PAIRS
+        for left_name, right_name in pairs:
             if left_name not in groups or right_name not in groups:
                 continue
             left, right = groups[left_name], groups[right_name]

@@ -31,11 +31,11 @@ class CourseDataTests(unittest.TestCase):
 
     def test_all_eight_groups_have_separate_strategy_and_budget(self):
         self.assertEqual([g[0] for g in GROUPS],
-                         ["A", "A′3", "A′8", "B3", "B8", "C3", "C8", "D"])
-        self.assertEqual([g[2] for g in GROUPS], [0, 3, 8, 3, 8, 3, 8, 0])
+                         ["A", "A′2", "A′6", "B2", "B6", "C2", "C6", "D"])
+        self.assertEqual([g[2] for g in GROUPS], [0, 2, 6, 2, 6, 2, 6, 0])
 
     def test_oracle_prompt_waits_for_each_answer_longer_than_relay_timeout(self):
-        prompt = _requirements_prompt("free", 3, "http://127.0.0.1:123/", 180)
+        prompt = _requirements_prompt("free", 2, "http://127.0.0.1:123/", 180)
         self.assertIn("at least 210 seconds", prompt)
         self.assertIn("Wait for its full answer", prompt)
         self.assertIn("public_test_cases/", prompt)
@@ -295,7 +295,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                  patch("harness.course_experiment.ua.update_repo_status"), \
                  patch("harness.course_experiment.ua.fetch_interaction_log",
                        return_value=[entry]):
-                row = await _attempt("realcode@005", "B3", "free", 3,
+                row = await _attempt("realcode@005", "B2", "free", 2,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
             saved = [json.loads(line) for line in (
@@ -413,7 +413,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                        return_value=entries), \
                  patch("harness.course_experiment.ua.fetch_interaction_stats",
                        return_value={"ok": True}):
-                row = await _attempt("realcode@005", "B3", "free", 3,
+                row = await _attempt("realcode@005", "B6", "free", 6,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
         self.assertEqual(row["status"], "success", row)
@@ -478,7 +478,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                            return_value=[{"question": "known?", "answer": "known answer"}]), \
                      patch("harness.course_experiment.ua.fetch_interaction_stats",
                            return_value={"ok": True}):
-                    row = await _attempt("realcode@005", "B3", "free", 3,
+                    row = await _attempt("realcode@005", "B2", "free", 2,
                                          "fuzzy", "detailed", Path("image.tar"),
                                          args, {}, "batch")
                 self.assertEqual(row["status"], "success", row)
@@ -514,7 +514,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                  patch("harness.course_experiment.ua.mint_append_id", return_value=append_id), \
                  patch("harness.course_experiment.ua.init_settings"), \
                  patch("harness.course_experiment.ua.update_repo_status"):
-                row = await _attempt("realcode@005", "A′3", "self", 3,
+                row = await _attempt("realcode@005", "A′2", "self", 2,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
         self.assertEqual(row["status"], "generation_error")

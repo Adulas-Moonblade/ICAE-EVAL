@@ -21,9 +21,9 @@ from .codex_runner import run_agent
 from .course_oracle import OracleRelay, confirmed_questions, service_questions
 from .runner_common import RateLimited
 
-GROUPS = (("A", "direct", 0), ("A′3", "self", 3), ("A′8", "self", 8),
-          ("B3", "free", 3), ("B8", "free", 8),
-          ("C3", "risk", 3), ("C8", "risk", 8), ("D", "detailed", 0))
+GROUPS = (("A", "direct", 0), ("A′2", "self", 2), ("A′6", "self", 6),
+          ("B2", "free", 2), ("B6", "free", 6),
+          ("C2", "risk", 2), ("C6", "risk", 6), ("D", "detailed", 0))
 RETRY_DELAYS = (30, 60, 120, 240)
 
 
