@@ -7,11 +7,16 @@ agent develops inside via `docker exec`; output persists on the host through the
 mount.
 """
 import hashlib
+import json
+import os
 import shutil
 import subprocess
+import tempfile
 import time
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import config as C
 
@@ -99,6 +104,7 @@ class Container:
     image_tag: str
     workdir: str
     code_path: Path
+    evaluation_image: str | None = None
 
     def exec(self, bash: str, *, timeout: float = 600, check: bool = False) -> subprocess.CompletedProcess:
         return _run(["docker", "exec", "-w", self.workdir, self.container_id,
@@ -136,12 +142,89 @@ def _clean_workdir(code_path: Path, *, fallback_image: str | None = None) -> Non
             capture_output=True, timeout=120)
 
 
+def codex_binary_path() -> Path:
+    return Path(os.environ.get(
+        "ICAE_CODEX_BINARY",
+        "/usr/local/lib/node_modules/@openai/codex/node_modules/"
+        "@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"))
+
+
+def codex_code_mode_host_path() -> Path:
+    return codex_binary_path().with_name("codex-code-mode-host")
+
+
+def _codex_gateway_no_proxy(codex_home: Path, extra: str | None) -> str | None:
+    """Keep Docker's proxy bypasses and add the configured direct model gateway."""
+    config_path = codex_home / "config.toml"
+    if not config_path.is_file():
+        return None
+    try:
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        provider = config.get("model_provider")
+        base_url = config.get("model_providers", {}).get(provider, {}).get("base_url", "")
+        gateway_host = urlsplit(base_url).hostname
+    except (OSError, ValueError, TypeError):
+        return None
+    if not gateway_host:
+        return None
+
+    docker_config = (Path(os.environ.get("DOCKER_CONFIG", str(Path.home() / ".docker"))) /
+                     "config.json")
+    try:
+        docker_bypass = json.loads(docker_config.read_text(encoding="utf-8")).get(
+            "proxies", {}).get("default", {}).get("noProxy", "")
+    except (OSError, ValueError, TypeError):
+        docker_bypass = ""
+    hosts = []
+    for source in (docker_bypass, os.environ.get("NO_PROXY"),
+                   os.environ.get("no_proxy"), extra, gateway_host):
+        for host in (source or "").split(","):
+            host = host.strip()
+            if host and host not in hosts:
+                hosts.append(host)
+    return ",".join(hosts)
+
+
+def ensure_codex_image(base_tag: str) -> str:
+    """Build a cached development image with the installed static Codex binary.
+
+    The evaluator continues to use ``base_tag``; Codex exists only in the
+    development image. A static Linux binary is required because benchmark base
+    images use different language runtimes and may not include Node/npm.
+    """
+    binary = codex_binary_path()
+    if not binary.is_file():
+        raise DockerError(f"static Codex binary not found: {binary}; set ICAE_CODEX_BINARY")
+    code_mode_host = codex_code_mode_host_path()
+    if not code_mode_host.is_file():
+        raise DockerError(f"Codex code-mode host not found: {code_mode_host}")
+    signature = ":".join(str(value) for value in (
+        base_tag, binary.resolve(), binary.stat().st_size, binary.stat().st_mtime_ns,
+        code_mode_host.resolve(), code_mode_host.stat().st_size,
+        code_mode_host.stat().st_mtime_ns))
+    tag = f"{base_tag}-codex-{hashlib.sha1(signature.encode()).hexdigest()[:10]}"
+    if _image_present(tag):
+        return tag
+    with tempfile.TemporaryDirectory(prefix="icae-codex-build-") as tmp:
+        context = Path(tmp)
+        shutil.copy2(binary, context / "codex")
+        shutil.copy2(code_mode_host, context / "codex-code-mode-host")
+        (context / "Dockerfile").write_text(
+            f"FROM {base_tag}\nUSER root\n"
+            "COPY --chmod=755 codex codex-code-mode-host /usr/local/bin/\n"
+            "RUN mkdir -p /root/.codex\n", encoding="utf-8")
+        _run(["docker", "build", "--network", "none", "-t", tag, str(context)], timeout=1800)
+    return tag
+
+
 def provision(alias: str, code_path: Path, prd_text: str, tar_path: Path, *,
               clean_workdir: bool = True, proxy: str | None = None,
               no_proxy: str | None = None,
               hide_real_tag: bool = True,
               name_suffix: str | None = None,
-              scaffold_src: Path | None = None) -> Container:
+              scaffold_src: Path | None = None,
+              codex_in_container: bool = False,
+              proxy_fallback_file: str | None = None) -> Container:
     """Prepare the host code path (PRD only), start the container, return it.
 
     alias:         the anonymous 'realcode@NNN' identifier (never the real key).
@@ -164,6 +247,7 @@ def provision(alias: str, code_path: Path, prd_text: str, tar_path: Path, *,
 
     anon_tag = anon_tag_for(alias, tar_path)
     image_tag = ensure_image(tar_path, anon_tag=anon_tag, hide_real_tag=hide_real_tag)
+    development_image = ensure_codex_image(image_tag) if codex_in_container else image_tag
 
     if clean_workdir:
         _clean_workdir(code_path, fallback_image=image_tag)
@@ -188,6 +272,26 @@ def provision(alias: str, code_path: Path, prd_text: str, tar_path: Path, *,
            "--name", name,
            "-v", f"{code_path}:{WORKDIR}",
            "-w", WORKDIR]
+    if codex_in_container:
+        # Host networking lets the in-container CLI reach the host Oracle relay
+        # and local model gateway without relying on Docker bridge firewall rules.
+        cmd += ["--user", "0:0", "--network", "host"]
+        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        if not proxy:
+            bypass = _codex_gateway_no_proxy(codex_home, no_proxy)
+            if bypass:
+                cmd += ["-e", f"NO_PROXY={bypass}", "-e", f"no_proxy={bypass}"]
+        for filename in ("config.toml", "auth.json"):
+            source = codex_home / filename
+            if source.is_file():
+                cmd += ["-v", f"{source}:/run/codex-{filename}:ro"]
+        for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID"):
+            if os.environ.get(key):
+                cmd += ["-e", key]
+    if proxy_fallback_file:
+        source = Path(proxy_fallback_file).expanduser()
+        if source.is_file():
+            cmd += ["-v", f"{source.resolve()}:/root/proxy.sh:ro"]
     # Blackhole the published-dataset hosts so the agent cannot download the
     # benchmark ground truth (expected_output / golden source) at gen time.
     cmd += C.docker_egress_args()
@@ -196,7 +300,13 @@ def provision(alias: str, code_path: Path, prd_text: str, tar_path: Path, *,
                 "-e", f"HTTP_PROXY={proxy}", "-e", f"HTTPS_PROXY={proxy}"]
         if no_proxy:
             cmd += ["-e", f"no_proxy={no_proxy}", "-e", f"NO_PROXY={no_proxy}"]
-    cmd += [image_tag, "sleep", "infinity"]
+    if codex_in_container:
+        cmd += [development_image, "sh", "-c",
+                "for f in config.toml auth.json; do "
+                "if [ -f /run/codex-$f ]; then cp /run/codex-$f /root/.codex/$f; fi; "
+                "done; exec sleep infinity"]
+    else:
+        cmd += [development_image, "sleep", "infinity"]
 
     last_err: Exception | None = None
     for attempt in range(PROVISION_RETRIES):
@@ -208,7 +318,8 @@ def provision(alias: str, code_path: Path, prd_text: str, tar_path: Path, *,
             if not container_id:
                 raise DockerError(f"docker run produced no container id for {alias}")
             return Container(container_id=container_id, image_tag=image_tag,
-                             workdir=WORKDIR, code_path=code_path)
+                             workdir=WORKDIR, code_path=code_path,
+                             evaluation_image=image_tag)
         except (DockerError, subprocess.TimeoutExpired) as e:  # noqa: PERF203
             last_err = e
             if attempt < PROVISION_RETRIES - 1:

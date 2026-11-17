@@ -10,6 +10,7 @@
 #   ./run.sh GLM-5.1                     # choose another configured model
 #   RUN_LIMIT=50 ./run.sh Opus-4.8       # complete lite set
 #   ./run.sh Opus-4.8 --difficulty easy  # pass any orchestrator option through
+#   ./run.sh --agent-framework codex --user-model-name Qwen3.7-Flash
 #
 set -euo pipefail
 
@@ -29,6 +30,19 @@ if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
     MODEL_NAME_EXPLICIT=true
     shift
 fi
+
+# The course entry point requires --repo and always runs all eight groups.
+COURSE_MODE=false
+course_args=()
+for argument in "$@"; do
+    if [ "$argument" = "--course" ]; then
+        COURSE_MODE=true
+    else
+        course_args+=("$argument")
+    fi
+done
+set -- "${course_args[@]}"
+if [ "$COURSE_MODE" = true ]; then AGENT_FRAMEWORK=codex; fi
 
 RUN_LIMIT="${RUN_LIMIT:-1}"
 ORACLE_PID=""
@@ -119,6 +133,7 @@ fi
 usage() {
     cat <<'EOF'
 Usage: ./run.sh [model-name] [orchestrator options...]
+       ./run.sh --course --repo realcode@005 [course options...]
 
 Defaults:
   model-name       Opus-4.8 (or $MODEL_NAME)
@@ -126,6 +141,8 @@ Defaults:
   scope            one repo from the lite set (or $RUN_LIMIT)
   concurrency      4 (or $CONCURRENCY)
   framework        claude-code (or $AGENT_FRAMEWORK)
+  Oracle model     Qwen3.8-Flash for Codex, DeepSeek-V3.2 otherwise
+                   override with --user-model-name or $USER_MODEL_NAME
 
 Examples:
   ./run.sh
@@ -133,6 +150,7 @@ Examples:
   RUN_LIMIT=50 ./run.sh Opus-4.8
   AGENT_FRAMEWORK=openhands ./run.sh GPT-5.5
   ./run.sh Codex-config --agent-framework codex --no-eval
+  ./run.sh --course --repo realcode@005
 EOF
 }
 
@@ -141,11 +159,28 @@ for argument in "$@"; do
         usage
         if "$PYTHON" -c "import anthropic, fastapi, requests" >/dev/null 2>&1; then
             echo
-            "$PYTHON" -m harness.orchestrator run --help
+            if [ "$COURSE_MODE" = true ]; then
+                "$PYTHON" -m harness.course_experiment --help
+            else
+                "$PYTHON" -m harness.orchestrator run --help
+            fi
         fi
         exit 0
     fi
 done
+
+if [ "$COURSE_MODE" = true ]; then
+    course_repo_present=false
+    for argument in "$@"; do
+        case "$argument" in
+            --repo|--repo=*) course_repo_present=true ;;
+        esac
+    done
+    if [ "$course_repo_present" = false ]; then
+        echo "[run] --course requires exactly one --repo PROJECT." >&2
+        exit 2
+    fi
+fi
 
 cd "$ROOT"
 
@@ -265,7 +300,7 @@ if validate_oracle != "true":
 if user_model_name not in users:
     raise SystemExit(
         f"[run] Oracle model '{user_model_name}' is not in "
-        "user_agent/user_model.json."
+        f"{user_file.relative_to(root)}."
     )
 user_entries = users[user_model_name]
 user_entries = user_entries if isinstance(user_entries, list) else [user_entries]
@@ -281,7 +316,7 @@ if not any(
 ):
     raise SystemExit(
         f"[run] Oracle model '{user_model_name}' is not configured in "
-        "user_agent/user_model.json."
+        f"{user_file.relative_to(root)}."
     )
 PY
 }
@@ -370,8 +405,23 @@ case "$USER_HOST" in
         ;;
 esac
 
-echo "[run] model=$MODEL_NAME scope=lite limit=$RUN_LIMIT concurrency=${CONCURRENCY:-4}"
-bash "$ROOT/scripts/run_lite_base.sh" \
-    "$MODEL_NAME" \
-    --limit "$RUN_LIMIT" \
-    "$@"
+if [ "$COURSE_MODE" = true ]; then
+    echo "[run] course model=$MODEL_NAME oracle=$USER_MODEL_NAME"
+    course_launch_args=()
+    if [ -n "$PROXY" ]; then course_launch_args+=(--proxy "$PROXY"); fi
+    if [ -n "$PROXY_FALLBACK_FILE" ]; then
+        course_launch_args+=(--proxy-fallback-file "$PROXY_FALLBACK_FILE")
+    fi
+    "$PYTHON" -m harness.course_experiment \
+        --model-name "$MODEL_NAME" --user-model-name "$USER_MODEL_NAME" \
+        --user-host "$USER_HOST" --user-init-port "$USER_INIT_PORT" \
+        --user-query-port "$USER_QUERY_PORT" --user-eval-port "$USER_EVAL_PORT" \
+        "${course_launch_args[@]}" \
+        "$@"
+else
+    echo "[run] model=$MODEL_NAME oracle=$USER_MODEL_NAME scope=lite limit=$RUN_LIMIT concurrency=${CONCURRENCY:-4}"
+    bash "$ROOT/scripts/run_lite_base.sh" \
+        "$MODEL_NAME" \
+        --limit "$RUN_LIMIT" \
+        "$@"
+fi

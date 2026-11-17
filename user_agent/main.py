@@ -269,7 +269,8 @@ def _calc_repo_stats(append_id: str, log_file: Path, max_interactions: int, mode
     triggered    = set()
     for e in turn_entries:
         triggered.update(e.get("triggers_hit", []))
-    fallbacks   = sum(1 for e in turn_entries if e.get("fallback_triggered"))
+    fallbacks   = sum(1 for e in turn_entries
+                      if e.get("fallback_triggered") or e.get("parse_error"))
     total_score = sum(e.get("score_adjustment", 0) for e in turn_entries)
 
     task_id = log_file.parent.name          # e.g. "realcode@001"
@@ -324,6 +325,12 @@ async def stats_endpoint(req: Request):
     # ── single task mode ──────────────────────────────────────────────────────
     if task_id:
         log_file = LOG_DIR / task_id / f"{append_id}.jsonl"
+        if body.get("include_log"):
+            if body.get("key") != INIT_KEY:
+                return {"status": {"ok": False, "error": "invalid key"}}
+            entries = ([json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()
+                        if line.strip()] if log_file.exists() else [])
+            return {"entries": entries, "status": {"ok": True}}
         if not log_file.exists():
             return {"status": {"ok": False, "error": f"no log for {task_id}"}}
         stats = _calc_repo_stats(append_id, log_file, max_interactions, model, difficulty)

@@ -1,30 +1,22 @@
 ## Task
 
-A Docker container is already up and running; its container ID is `{docker_id}`. Inside the container, `{workdir}/{prd_name}` is the PRD document for this task. **Enter that container** and implement the required functionality based solely on the PRD. All development, compilation, execution, and self-testing MUST be done **inside this container**.
+You are running inside the development container. `{workdir}/{prd_name}` is the PRD document for this task. Implement the required functionality based solely on the PRD. All development, compilation, execution, and self-testing must be done here.
 
 ## Inputs
 
-- Running container: `{docker_id}`
 - PRD document: `{workdir}/{prd_name}` (inside the container)
 - Target programming language: {lang}
 
-## How to enter the container
-
-The container is already running in the background (`sleep infinity`). Use `docker exec` to run commands, for example:
-
-```bash
-docker exec -w {workdir} {docker_id} bash -lc 'cat {prd_name}'
-docker exec -w {workdir} {docker_id} bash -lc '<your build/run command>'
-```
-
-`{workdir}` is bind-mounted to the host's current working directory, so any code you generate under `{workdir}` inside the container automatically appears in the host's current directory for evaluation. **Write all of your deliverables under the container's `{workdir}` directory.**
+Work directly in `{workdir}`. Write all deliverables there for evaluation.
 
 ## Requirements
 
 1. You MUST implement the full functionality yourself. Downloading the source code of the target repository from the internet, or directly calling its existing API, is prohibited.
-2. First read `{workdir}/{prd_name}` thoroughly. If the PRD contains a "Clarification / Oracle" interaction section, the requirement is **intentionally incomplete and vague** — you should **first ask the Oracle questions as instructed** to clarify the hidden interface contracts, feature details, and test cases, and **only start coding once things are clear**. Anything left unclarified will turn into bugs. The number of questions is budgeted, so watch `status.remaining`.
-3. The example cases embedded in the PRD are the dispatcher's input/output contract. You need to design the dispatcher / runner / `rcb_tests/test.sh` yourself, and turn the examples shown in the PRD into `rcb_tests/public_test_cases/*.json` for self-checking.
+2. First read `{workdir}/{prd_name}` thoroughly. The requirements processing phase has already completed. Do not contact the Oracle during coding. Use only the PRD and any confirmed clarifications included in it.
+3. Inspect the supplied `rcb_tests/public_test_cases/*.json` first. They are the public dispatcher input/output contract; preserve them and use them for self-checking. If none are supplied, use any PRD examples or create representative cases from the stated behavior. Design the dispatcher / runner / `rcb_tests/test.sh` yourself.
 4. `bash rcb_tests/test.sh` MUST support `--cases-dir <subdir>` to switch the cases directory, and MUST write each case's stdout to `rcb_tests/stdout/<cases-dir>/{{stem}}@{{idx:03}}.txt` (each file contains only the raw stdout of the program under test, without any PASS/FAIL markers). This is the evaluation protocol; you must follow it exactly.
+
+   At evaluation time, case JSON files contain `input` but their `expected_output` fields are removed. Your test runner MUST still process every case and write every stdout file without `expected_output`. You may compare against `expected_output` during local self-checks only when that field is present; a mismatch must not stop the runner before it writes the remaining output files.
 
 ## Environment & dependencies (**must read**)
 
@@ -54,4 +46,4 @@ docker exec -w {workdir} {docker_id} bash -lc '<your build/run command>'
 
 8. **Do not hard-code absolute paths.** Developer-machine paths, SDK install directories, and local package cache paths must never be written into `test.sh` / build scripts; use relative paths or environment variables only.
 
-9. **Rebuild from a clean state before self-checking**: `rm -rf` build caches such as `target/`, `bin/`, `obj/`, `node_modules/`, `build/`, then run `bash rcb_tests/test.sh --cases-dir public_test_cases` to ensure the toolchain bootstrap and all dependencies are correctly captured by `test.sh` + the declaration files and all public cases pass. Only then is the task complete.
+9. **Rebuild from a clean state before self-checking**: remove build caches such as `target/`, `bin/`, `obj/`, `node_modules/`, `build/` using a command your tools permit, then run `bash rcb_tests/test.sh --cases-dir public_test_cases` to ensure the toolchain bootstrap and all dependencies are correctly captured by `test.sh` + the declaration files and all public cases pass. Only then is the task complete.

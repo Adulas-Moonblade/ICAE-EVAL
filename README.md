@@ -132,13 +132,44 @@ The default command performs a one-repository smoke test with `Opus-4.8`. It use
 
 #### Codex CLI
 
-Install and configure Codex CLI before the run. The Codex runner calls `codex exec` and uses the CLI's existing `~/.codex/config.toml` provider/model and `~/.codex/auth.json` authentication. It does not read `ANTHROPIC_*` or `OPENHANDS_*` endpoints from `model_list.json`. The `Codex-config` name in the command above is an experiment label; it need not be in `model_list.json`. To override only the CLI model for an experiment, add `"Codex-config": {"CODEX_MODEL": "your-model-id"}` under `Tested Model`; provider routing and authentication still come from Codex CLI.
+Install and configure Codex CLI before the run. The Codex runner calls `codex exec` and uses the CLI's existing provider and `~/.codex/auth.json` authentication. It does not read `ANTHROPIC_*` or `OPENHANDS_*` endpoints from `model_list.json`. The default `Codex-config` entry pins `gpt-6-sol` with `medium` reasoning for this experiment via `CODEX_MODEL` and `CODEX_REASONING_EFFORT`; provider routing and authentication still come from Codex CLI. You can choose another configured entry with `--model-name`, or omit an entry to use your CLI model settings.
 
-The Oracle is independent of the coding agent. For Codex runs its default is `Qwen3.8-Flash`; configure that key in `user_agent/user_model.json` before running, or pass `--user-model-name` to choose another configured Oracle.
+The Oracle is independent of the coding agent. For Codex runs its default is `Qwen3.8-Flash`; pass `--user-model-name Qwen3.7-Flash` (or another configured registry key) to select a different Oracle. The default applies only when no Oracle model is specified. Configure the selected model in `user_agent/user_model.local.json` before running.
 
-Codex writes its event stream to `results/<append_id>/trajectory/<alias>.jsonl` and a readable log beside it. Token counts come from Codex's `turn.completed` usage, including cached input tokens. Codex CLI does not report a cost or a model-iteration count, so `cost_usd` stays `0` and `num_turns` counts the top-level `exec` turn. `--max-turns` cannot limit Codex's internal model iterations; use `--timeout` to bound a run. The runner uses the CLI's unattended permission bypass so it can execute the benchmark's Docker commands; run it on an isolated benchmark host.
+Codex runs inside a cached development image derived from the task's base image. The harness copies the installed static Codex binary into that image and mounts the host CLI's `config.toml` and `auth.json` into the running container. Set `ICAE_CODEX_BINARY` if the static binary is installed at a different path. Evaluation uses the original base image. Codex writes its event stream to `results/<append_id>/trajectory/<alias>.jsonl` and a readable log beside it. Token counts come from Codex's `turn.completed` usage, including cached input tokens. Codex CLI does not report a cost or a model-iteration count, so `cost_usd` stays `0` and `num_turns` counts the top-level `exec` turn. `--max-turns` cannot limit Codex's internal model iterations; use `--timeout` to bound a run.
 
-For course experiments, the Codex runner appends a host-command scope reminder and watches command-start events for obvious attempts to read benchmark answers or credentials, or to control other Docker containers. It stops generation with `scope_violation:<rule>` and records `scope.violation` in the trajectory JSONL when it sees one. This is a best-effort check: commands can begin before their events reach the runner, and the unattended CLI still has host access. Review the full trajectory before treating a score as uncontaminated.
+The development container uses host networking so Codex can reach the local Oracle relay and model gateway. The runner retains its command-event scope check for legacy host Codex calls. The course workflow starts a fresh Codex session in the development container for each phase.
+
+#### Eight-group course experiment
+
+Run exactly one project per invocation. The command requires `--repo` and executes A, A′3, A′8, B3, B8, C3, C8, and D in order:
+
+```bash
+./run.sh --course --repo realcode@005
+./run.sh --course --repo realcode@005 --model-name Codex-config --user-model-name Qwen3.8-Flash
+./run.sh --course --repo realcode@005 --codex-model gpt-6-sol --reasoning-effort medium
+```
+
+A and D have a recorded requirements phase with zero clarification time. A′3/A′8 form their own assumptions; B/C ask the Oracle through a relay, with 3/8 question budgets. The harness obtains the original Oracle service log for B/C, removes fallback replies from coding input, and saves the complete log on the host. Every group starts coding in a freshly initialized workspace and a new Codex session. Infrastructure retries receive new `append_id` values; failed attempts are retained but are not evaluated. The D input is `detailed_prds_oracle/<alias>/start.md`. Default timeouts are 60 minutes for requirements, 120 minutes for coding, 180 seconds per Oracle request, and 40 minutes per evaluation tier. The 15-minute Codex inactivity limit also applies.
+
+Results are indexed by `results/course_runs/<batch_id>/summary.json`. Each group also has its own `results/<append_id>/` with requirements and coding JSONL, Oracle logs, generated code, and `objective.json` under `_eval/<alias>/`. `--no-eval` skips the final objective test. The course entry point uses Fuzzy L1 (`fuzzy_prds/`) and supplies the same public test case scaffold to all eight groups.
+
+After each eight-group run, export that batch's statistics and key original files:
+
+```bash
+python3 -m harness.course_report --run-dir results/course_runs/<batch_id>
+```
+
+The default destination is `results/course_exports/<batch_id>/`. It contains a short data guide, `runs.csv` (23 columns, one row per group), `pairs.csv` (11 columns, selected within-batch differences), `diagnostics.json`, the original `summary.json`, and a `groups/` tree with each attempt's available settings, Codex JSONL trajectories, requirements output, Oracle logs, coding `start.md`, objective score, and evaluation build logs. Model and runner settings remain in `summary.json` and can be joined to the CSV files by `batch_id`. `manifest.json` records each copied file's source path, size, SHA256, and expected files that were missing. The export refuses to overwrite an existing directory; use `--output-dir <new_path>` for a second snapshot. Per-case `outcap_*` files and generated code remain in `results/<append_id>/` and are not copied. Oracle logs can contain hidden requirement details, so keep the export on the trusted host.
+
+Later, export the cross-batch analysis tables without calling models or changing source results:
+
+```bash
+python3 -m harness.course_report
+python3 -m harness.course_report --repo realcode@005 --batch-id <batch_id>
+```
+
+This writes `results/course_report/runs.csv` (one row per group), `pairs.csv` (within-task group differences, right minus left), and `diagnostics.json` (missing or inconsistent data). It does not average tasks or repetitions; the exported rows and batch summaries are the input for downstream analysis. A missing objective score stays blank; a completed generation that omitted `rcb_tests/test.sh` scores zero. Use `study_ready=True` rows for formal comparisons. New course summaries record hashes of the PRDs, Oracle data, test cases, runner files, and Codex CLI configuration along with timeout settings, so data revisions can be identified across batches. Older summaries have no hashes and remain available for exploratory inspection with a diagnostic flag.
 
 ## 🔍 How It Works
 

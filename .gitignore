@@ -16,6 +16,8 @@ rcb_tests_repos.tar.gz
 icae_prd_bundle.tar.gz
 .icae-prd-bundle-complete
 repo_alias.json
+detailed_prds/
+detailed_prds_oracle/
 fuzzy_prds/
 fuzzy_prds_easy/
 fuzzy_prds_medium/

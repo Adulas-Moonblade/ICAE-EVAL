@@ -69,16 +69,17 @@ class CodexRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.record = self.root / "invocation.json"
         self.log = self.root / "trajectory" / "task.log"
 
-    async def invoke(self, case, model=None, timeout=5):
+    async def invoke(self, case, model=None, effort=None, timeout=5):
         env = {"ICAE_CODEX_CLI": str(self.cli), "FAKE_RECORD": str(self.record),
                "FAKE_CASE": case}
         with patch.dict(os.environ, env):
             return await run_agent("implement task", self.root, self.log,
-                                   {"CODEX_MODEL": model} if model else {},
+                                   {k: v for k, v in (("CODEX_MODEL", model),
+                                                        ("CODEX_REASONING_EFFORT", effort)) if v},
                                    timeout=timeout)
 
     async def test_success_keeps_events_and_usage(self):
-        result = await self.invoke("success", model="example-model")
+        result = await self.invoke("success", model="example-model", effort="medium")
         self.assertEqual(result.status, "success")
         self.assertEqual((result.input_tokens, result.output_tokens,
                           result.cache_read_tokens, result.num_turns), (120, 25, 30, 1))
@@ -90,6 +91,8 @@ class CodexRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--json", call["argv"])
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", call["argv"])
         self.assertEqual(call["argv"][call["argv"].index("--model") + 1], "example-model")
+        self.assertEqual(call["argv"][call["argv"].index("--config") + 1],
+                         "model_reasoning_effort=medium")
         events = [json.loads(line) for line in self.log.with_suffix(".jsonl").read_text().splitlines()]
         self.assertEqual(events[-1]["type"], "turn.completed")
         self.assertEqual(events[0]["prompt"], call["prompt"])
@@ -121,6 +124,32 @@ class CodexRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.detail, "timeout_overall")
         self.assertIn("timeout_overall", self.log.read_text())
+
+    async def test_container_mode_executes_codex_inside_container(self):
+        docker = self.root / "docker"
+        docker.write_text('''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_DOCKER_RECORD"], "w") as f:
+    json.dump(sys.argv[1:], f)
+args = sys.argv[1:]
+idx = args.index("codex")
+os.execv(os.environ["FAKE_CODEX_PATH"], ["codex", *args[idx + 1:]])
+''')
+        docker.chmod(0o755)
+        docker_record = self.root / "docker.json"
+        env = {"PATH": f"{self.root}:{os.environ['PATH']}",
+               "FAKE_CODEX_PATH": str(self.cli), "FAKE_DOCKER_RECORD": str(docker_record),
+               "FAKE_RECORD": str(self.record), "FAKE_CASE": "success"}
+        with patch.dict(os.environ, env):
+            result = await run_agent("implement task", self.root, self.log, {},
+                                     timeout=5, container_id="container-123")
+        self.assertEqual(result.status, "success")
+        docker_args = json.loads(docker_record.read_text())
+        self.assertEqual(docker_args[:6],
+                         ["exec", "-i", "-w", "/workspace", "container-123", "codex"])
+        call = json.loads(self.record.read_text())
+        self.assertEqual(call["prompt"], "implement task")
+        self.assertEqual(call["argv"][call["argv"].index("-C") + 1], "/workspace")
 
 
 if __name__ == "__main__":

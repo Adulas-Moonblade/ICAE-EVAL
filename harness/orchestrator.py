@@ -334,6 +334,8 @@ async def process_repo(alias: str, args, model_entries: list, append_id: str,
                 hide_real_tag=(args.env_mode.strip() == "ultimate"),
                 name_suffix=append_id[:8],
                 scaffold_src=scaffold_src,
+                codex_in_container=(args.agent_framework == "codex"),
+                proxy_fallback_file=args.proxy_fallback_file,
             )
         except Exception as e:  # noqa: BLE001
             print(f"[{alias}] FAIL (docker): {e}")
@@ -357,7 +359,8 @@ async def process_repo(alias: str, args, model_entries: list, append_id: str,
         #    run those orphans pile up past the concurrency cap and exhaust host
         #    memory (the failure mode behind the 2026-06-20 hang).
         image_tag = container.image_tag
-        prompt = render_task_prompt(alias, docker_id=container.container_id, lang=lang)
+        prompt = render_task_prompt(alias, docker_id=container.container_id, lang=lang,
+                                    in_container=(args.agent_framework == "codex"))
         # Fresh trajectory per (re)generation: overwrite this repo's transcript so it
         # reflects only the current attempt. If the PRIOR attempt ended in error, its
         # trajectory is archived under trajectory/_failed/ first (post-mortem for
@@ -365,7 +368,9 @@ async def process_repo(alias: str, args, model_entries: list, append_id: str,
         _reset_trajectory(log_path, prior)
         try:
             result = await _run_with_backoff(prompt, code_path, log_path,
-                                             model_entries, args, start_idx=entry_idx)
+                                             model_entries, args, start_idx=entry_idx,
+                                             container_id=(container.container_id
+                                                           if args.agent_framework == "codex" else None))
         finally:
             try:
                 container.teardown()
@@ -427,7 +432,7 @@ def _is_retryable_detail(detail: str) -> bool:
 
 
 async def _run_with_backoff(prompt, code_path, log_path, model_entries, args,
-                            start_idx: int = 0):
+                            start_idx: int = 0, container_id: str | None = None):
     """Run the agent, retrying transient infra/API failures with backoff.
 
     `model_entries` is the model's endpoint pool. Each retry rotates to the next
@@ -446,8 +451,10 @@ async def _run_with_backoff(prompt, code_path, log_path, model_entries, args,
     while True:
         entry = pool[(start_idx + attempt) % n]
         try:
+            extra = {"container_id": container_id} if container_id else {}
             result = await runner(prompt, code_path, log_path, entry,
-                                  max_turns=args.max_turns, timeout=args.timeout)
+                                  max_turns=args.max_turns, timeout=args.timeout,
+                                  **extra)
         except RateLimited as e:
             if attempt >= len(RATELIMIT_BACKOFF):
                 return AgentResult(status="error", is_error=True, detail=f"ratelimited: {e}")
@@ -459,6 +466,10 @@ async def _run_with_backoff(prompt, code_path, log_path, model_entries, args,
         if (getattr(result, "status", None) == "error"
                 and _is_retryable_detail(getattr(result, "detail", ""))
                 and attempt < len(RATELIMIT_BACKOFF)):
+            if container_id and result.detail in ("timeout_overall", "timeout_inactivity"):
+                # The Docker exec client may be gone while its child still runs.
+                # Let process_repo remove this container before another attempt.
+                return result
             delay = RATELIMIT_BACKOFF[attempt]
             print(f"  [infra] {result.detail!r}; rotate endpoint + backoff {delay}s "
                   f"(attempt {attempt + 1})")
@@ -562,14 +573,14 @@ async def run_async(args) -> None:
     else:
         if framework == "codex":
             # The Codex CLI owns provider routing and authentication. A registry
-            # entry is optional and may only supply a CODEX_MODEL override.
+            # entry may override its model and reasoning effort for this run.
             try:
                 configured = C.resolve_model(args.model_name)
             except KeyError:
                 configured = []
             model_entries = [
-                {"CODEX_MODEL": e["CODEX_MODEL"]}
-                for e in configured if e.get("CODEX_MODEL")
+                {k: e[k] for k in ("CODEX_MODEL", "CODEX_REASONING_EFFORT") if e.get(k)}
+                for e in configured if e.get("CODEX_MODEL") or e.get("CODEX_REASONING_EFFORT")
             ] or [{}]
         else:
             model_entries = C.resolve_model(args.model_name)
@@ -668,6 +679,7 @@ async def run_async(args) -> None:
                 or model_entries[0].get("OPENHANDS_MODEL")
                 or model_entries[0].get("ANTHROPIC_MODEL")
             ),
+            "endpoint_reasoning_effort": model_entries[0].get("CODEX_REASONING_EFFORT"),
             "agent_framework": getattr(args, "agent_framework", "claude-code"),
             "selected_repos": repos,
             "requested_repos": args.repos,
@@ -791,8 +803,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--model-name", required=True,
                    help="key in model_list.json, or a run label for Codex CLI")
     r.add_argument("--user-model-name", default=None,
-                   choices=["Qwen3.8-Flash", "Gemini-3.1-Flash-Lite", "DeepSeek-V3.2"],
-                   help="User Agent (Oracle) model; synced to the User Agent at "
+                   help="configured User Agent (Oracle) model key; synced at "
                         "init so it binds the model to the append_id "
                         "(default: Qwen3.8-Flash for Codex, DeepSeek-V3.2 otherwise)")
     r.add_argument("--no-eval", dest="eval", action="store_false")

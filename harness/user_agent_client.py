@@ -127,6 +127,27 @@ def fetch_interaction_stats(append_id: str, *, user_host: str, user_eval_port: i
     return out
 
 
+def fetch_interaction_log(append_id: str, task_id: str, *, user_host: str,
+                          user_eval_port: int, timeout: float = 30.0) -> list[dict]:
+    """Fetch the Oracle service's original per-task interaction entries.
+
+    This host-only request uses the harness init key and must never be passed to
+    the Coding Agent. The separate relay still strips internal_log from replies.
+    """
+    url = f"http://{user_host}:{user_eval_port}/"
+    response = requests.post(url, json={"append_id": append_id, "task_id": task_id,
+                                        "include_log": True, "key": C.INIT_KEY},
+                             timeout=timeout)
+    response.raise_for_status()
+    body = response.json()
+    if not (body.get("status") or {}).get("ok"):
+        raise RuntimeError(f"Oracle log export failed: {body.get('status')}")
+    entries = body.get("entries")
+    if not isinstance(entries, list):
+        raise RuntimeError("Oracle log export returned no entries")
+    return entries
+
+
 # ── settings persistence (registry + per-run) ────────────────────────────────
 # Registry  results/settings.json            : {append_id: {config...}}  (NO repos)
 # Per-run    results/<append_id>/settings.json: {append_id, config, repos:{...}}

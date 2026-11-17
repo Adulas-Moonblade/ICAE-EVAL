@@ -1,8 +1,9 @@
 """Run the installed Codex CLI as one ICAE coding agent.
 
-Codex reads its normal user config and auth. The only optional model override is
-CODEX_MODEL in the selected model registry entry; endpoint credentials are never
-copied into its process environment. JSON events are kept verbatim in .jsonl.
+Codex reads its normal user config and auth. CODEX_MODEL and
+CODEX_REASONING_EFFORT in the selected model registry entry override its model
+settings; endpoint credentials are never copied into its process environment.
+JSON events are kept verbatim in .jsonl.
 """
 import asyncio
 import json
@@ -61,7 +62,8 @@ async def _stop_process(process) -> None:
 
 
 async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
-                    *, max_turns: int = 200, timeout: float | None = 7200) -> AgentResult:
+                    *, max_turns: int = 200, timeout: float | None = 7200,
+                    container_id: str | None = None) -> AgentResult:
     """Run one noninteractive Codex session in the bind-mounted task directory.
 
     Codex reports one top-level turn per `exec`; its JSON stream does not expose
@@ -70,13 +72,16 @@ async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
     """
     del max_turns
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    command = [
-        os.environ.get("ICAE_CODEX_CLI", "codex"), "exec", "--json",
+    command = (["docker", "exec", "-i", "-w", "/workspace", container_id, "codex"]
+               if container_id else [os.environ.get("ICAE_CODEX_CLI", "codex")])
+    command += ["exec", "--json",
         "--ephemeral", "--skip-git-repo-check", "--color", "never",
-        "--dangerously-bypass-approvals-and-sandbox", "-C", str(cwd),
+        "--dangerously-bypass-approvals-and-sandbox", "-C", "/workspace" if container_id else str(cwd),
     ]
     if model_entry.get("CODEX_MODEL"):
         command += ["--model", str(model_entry["CODEX_MODEL"])]
+    if model_entry.get("CODEX_REASONING_EFFORT"):
+        command += ["--config", f"model_reasoning_effort={model_entry['CODEX_REASONING_EFFORT']}"]
     command.append("-")  # pass the task prompt via stdin, never the process list
 
     transcript_path = log_path.with_suffix(".jsonl")
@@ -92,10 +97,14 @@ async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
 
         w(f"\n===== codex run_agent @ {time.strftime('%Y-%m-%d %H:%M:%S')} "
           f"cwd={cwd} model={model_entry.get('CODEX_MODEL') or '(CLI config)'} "
+          f"effort={model_entry.get('CODEX_REASONING_EFFORT') or '(CLI config)'} "
           f"(overall={timeout}s inactivity={INACTIVITY_TIMEOUT}s) =====")
-        scoped_prompt = prompt + CODEX_SCOPE
+        scoped_prompt = prompt if container_id else prompt + CODEX_SCOPE
         emit({"type": "prompt", "prompt": scoped_prompt, "cwd": str(cwd),
-              "model": model_entry.get("CODEX_MODEL"), "ts": time.time()})
+              "container_id": container_id,
+              "model": model_entry.get("CODEX_MODEL"),
+              "reasoning_effort": model_entry.get("CODEX_REASONING_EFFORT"),
+              "ts": time.time()})
         try:
             process = await asyncio.create_subprocess_exec(
                 *command, cwd=str(cwd), stdin=asyncio.subprocess.PIPE,
@@ -131,6 +140,7 @@ async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
         last_text = ""
         last_error = ""
         stderr_tail = ""
+        fatal_tool_error = ""
         closed = 0
         timeout_detail = ""
         scope_violation = None
@@ -180,6 +190,11 @@ async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
                 elif kind in ("item.started", "item.updated", "item.completed"):
                     item = event.get("item") or {}
                     item_type = item.get("type", "")
+                    if kind == "item.completed" and item_type == "error":
+                        message = str(item.get("message") or "")
+                        if ("code mode is unavailable" in message.lower() or
+                                "failed to spawn code-mode host" in message.lower()):
+                            fatal_tool_error = message
                     if kind == "item.started" and item_type == "command_execution":
                         scope_violation = _scope_violation(str(item.get("command") or ""))
                         if scope_violation:
@@ -222,6 +237,10 @@ async def run_agent(prompt: str, cwd: Path, log_path: Path, model_entry: dict,
                                detail=f"scope_violation:{scope_violation}", **base)
         if timeout_detail:
             return AgentResult(status="error", is_error=True, detail=timeout_detail, **base)
+        if fatal_tool_error:
+            w(f"[result] error: {fatal_tool_error[:2000]}")
+            return AgentResult(status="error", is_error=True,
+                               detail=fatal_tool_error[:2000], **base)
         detail = last_error or (stderr_tail.strip() if process.returncode else "")
         if (failed or process.returncode != 0 or not completed) and _contains(detail, RATELIMIT_MARKERS):
             raise RateLimited(detail[:300])

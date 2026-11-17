@@ -32,5 +32,14 @@
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "api_key": "<YOUR_API_KEY>"
         }
+    ],
+
+    "Qwen3.7-Flash": [
+        {
+            "api_type": "openai",
+            "model_name": "qwen3.7-flash",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "<YOUR_API_KEY>"
+        }
     ]
 }
