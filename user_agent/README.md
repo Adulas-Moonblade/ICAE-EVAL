@@ -7,7 +7,7 @@
 - **唯一信息来源**：每个任务对应的 `prd_json/<username>__<repo_name>.json` 里的 `oracle_data`（`hidden_constraints` / `context_pointers` / `golden_api_signature` / `fallback_response`）。
 - **不读真实仓库**：所以 User Agent 没有任何工具（纯对话），用 `anthropic` 的 Messages API 实现，而不是 Agent SDK —— Agent SDK 自带的 Claude Code 身份会把 Oracle 人设冲掉。
 - **严格 JSON 输出**：模型每轮输出 `{"_internal_log": {...}, "reply": "..."}`；只有 `reply` 会回给被测 Agent，`_internal_log` 留作内部计分。
-- **Fallback 与日志**：只有整条问题足够具体且全部由 Oracle 数据覆盖时才允许披露约束。含糊问题、未命中问题、混合已定义/未定义行为的问题，以及打包过多独立主题的问题，都必须原样返回 `fallback_response`，不披露部分命中内容；同一操作、同一场景的一项完整输出契约（字段、顺序、格式、换行等）只算一个主题。Fallback 仍正常消耗一次交互预算。服务端每轮只调用一次模型；解析失败时转交原始文本并单独记录 `parse_error`。字段缺失或类型异常只做不阻断回答的兜底，并在服务日志的 `schema_errors` 中记录。日志保留模型的 `raw_response`；Fallback Rate 仅根据模型输出的有效 `fallback_triggered` 布尔值计算。
+- **Fallback、披露范围与日志**：只有整条问题足够具体且全部由 Oracle 数据覆盖时才允许披露约束。命中一张约束卡只允许使用其中回答当前问题所需的事实，不得顺带披露同卡中未被询问的操作、边界或例子；完整测试文件请求仍可返回整份文件。含糊问题、未命中问题、混合已定义/未定义行为的问题，以及打包过多独立主题的问题，都必须原样返回 `fallback_response`，不披露部分命中内容；同一操作、同一场景的一项完整输出契约（字段、顺序、格式、换行等）只算一个主题。Fallback 仍正常消耗一次交互预算。服务端每轮只调用一次模型；解析失败时转交原始文本并单独记录 `parse_error`。字段缺失或类型异常只做不阻断回答的兜底，并在服务日志的 `schema_errors` 中记录。日志保留模型的 `raw_response`；Fallback Rate 仅根据模型输出的有效 `fallback_triggered` 布尔值计算。
 
 ## 目录结构
 

@@ -16,7 +16,7 @@ from unittest.mock import patch
 import requests
 
 from harness import config as C
-from harness.course_experiment import (GROUPS, _attempt, _coding_prd, _overall,
+from harness.course_experiment import (GROUPS, RISK_STRATEGY_VERSION, _attempt, _coding_prd, _overall,
                                        _phase, _requirements_prompt, _selected_groups,
                                        build_parser, run)
 from harness.course_oracle import (OracleRelay, _validate_risk_request,
@@ -62,14 +62,20 @@ class CourseDataTests(unittest.TestCase):
 
     def test_risk_prompt_uses_gap_inventory_without_numeric_ranking(self):
         prompt = _requirements_prompt("risk", 3, "http://127.0.0.1:123/", 180)
+        self.assertEqual(RISK_STRATEGY_VERSION, "gap_v2_1")
         self.assertIn("systematically identify", prompt)
         self.assertIn("every open gap", prompt)
         self.assertIn("selection_reason", prompt)
         self.assertIn("focused fallback", prompt)
+        self.assertIn("scenario-specific gaps", prompt)
+        self.assertIn("zero, negative, and noninteger inputs", prompt)
+        self.assertIn("only one or two questions remain", prompt)
+        self.assertIn("unasked core state transitions", prompt)
         self.assertNotIn("impact*uncertainty", prompt)
         self.assertNotIn("highest score", prompt)
-        self.assertNotIn("selection_reason", _requirements_prompt(
-            "free", 3, "http://127.0.0.1:123/", 180))
+        free_prompt = _requirements_prompt("free", 3, "http://127.0.0.1:123/", 180)
+        self.assertNotIn("selection_reason", free_prompt)
+        self.assertNotIn("scenario-specific gaps", free_prompt)
 
     def test_risk_request_requires_full_inventory_but_allows_reasoned_override(self):
         gaps = [
@@ -612,6 +618,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 8)
         self.assertEqual(list(result["groups"]), [g[0] for g in GROUPS])
         self.assertTrue(all(c[0] == "realcode@005" for c in calls))
+        self.assertIsNotNone(result["input_fingerprints"]["oracle_prompt"])
 
 
 if __name__ == "__main__":

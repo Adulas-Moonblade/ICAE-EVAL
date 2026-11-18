@@ -26,7 +26,7 @@ GROUPS = (("A", "direct", 0), ("A′3", "self", 3), ("A′8", "self", 8),
           ("B3", "free", 3), ("B8", "free", 8),
           ("C3", "risk", 3), ("C8", "risk", 8), ("D", "detailed", 0))
 RETRY_DELAYS = (30, 60, 120, 240)
-RISK_STRATEGY_VERSION = "gap_v2"
+RISK_STRATEGY_VERSION = "gap_v2_1"
 
 
 class InfrastructureError(RuntimeError):
@@ -131,11 +131,21 @@ def _requirements_prompt(strategy: str, budget: int, relay_url: str | None,
             "candidate question; do not omit open gaps from the candidate list. "
             "Candidates should address independent gaps, not repeat answered "
             "questions or combine unrelated behaviors. A coherent output contract "
-            "for one scenario can remain one gap. Assign each candidate high, "
+            "for one scenario can remain one gap. If a gap spans different operations "
+            "or boundary values that could have different outcomes, split it into "
+            "scenario-specific gaps and focused candidates before asking. Do not "
+            "bundle zero, negative, and noninteger inputs into one broad validation "
+            "question when they may behave differently; do not invent irrelevant "
+            "scenarios merely to fill the inventory. Assign each candidate high, "
             "medium, or low priority with a short reason based on implementation "
             "impact, uncertainty, expected answer value, and likely answerability. "
             "Normally choose the highest-priority candidate, but you may choose "
             "another when your selection_reason explains the concrete tradeoff. "
+            "When only one or two questions remain, review all unresolved high- and "
+            "medium-priority gaps again, especially unasked core state transitions "
+            "and boundary behavior. Compare their expected implementation value and "
+            "likely answerability with exact-output details; neither category always "
+            "wins. State the reason for the final selection in selection_reason. "
             "After each answer, update the full gap inventory and candidates. "
             "Mark a gap resolved only when supported by the answer or public "
             "evidence. A broad-question fallback may call for a narrower question; "
@@ -450,6 +460,7 @@ async def run(args) -> dict:
         "docker_environment": C.HARNESS / "docker_env.py",
         "oracle_service": C.USER_AGENT_DIR / "main.py",
         "oracle_runtime": C.USER_AGENT_DIR / "user_agent.py",
+        "oracle_prompt": C.USER_AGENT_DIR / "init.md",
         "oracle_model_config": C.USER_MODEL_FILE,
         "shell_runner": C.ROOT / "run.sh",
     }

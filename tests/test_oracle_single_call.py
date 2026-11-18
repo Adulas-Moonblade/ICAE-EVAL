@@ -39,6 +39,14 @@ class OracleSingleCallTests(unittest.TestCase):
         self.assertIn("independent requirement topics or ambiguities", prompt)
         self.assertIn("A fallback response still consumes one interaction", prompt)
 
+    def test_system_prompt_limits_answer_to_asked_scope_within_matched_card(self):
+        prompt = oracle_core.build_system_prompt({"oracle_data": {}})
+        self.assertIn("does **not** authorize reproducing the entire card", prompt)
+        self.assertIn("omit those unasked facts", prompt)
+        self.assertIn("Do not add unsolicited comparisons", prompt)
+        self.assertIn("complete output contract", prompt)
+        self.assertIn("full-test-case exception", prompt)
+
     def test_one_model_call_returns_reply_without_protocol_validation(self):
         raw = json.dumps({"reply": "Known rule", "_internal_log": {
             "fallback_triggered": True}})
