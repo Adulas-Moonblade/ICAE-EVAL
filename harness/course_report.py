@@ -15,21 +15,21 @@ from .course_experiment import GROUPS
 
 GROUP_NAMES = tuple(group for group, _, _ in GROUPS)
 PAIRS = (
-    ("A", "A′2"), ("A", "A′6"), ("A", "B2"), ("A", "B6"),
-    ("A", "C2"), ("A", "C6"), ("A", "D"),
-    ("A′2", "A′6"), ("A′2", "B2"), ("A′6", "B6"),
-    ("B2", "B6"), ("C2", "C6"), ("B2", "C2"), ("B6", "C6"),
-    ("B2", "D"), ("B6", "D"), ("C2", "D"), ("C6", "D"),
+    ("A", "A′3"), ("A", "A′8"), ("A", "B3"), ("A", "B8"),
+    ("A", "C3"), ("A", "C8"), ("A", "D"),
+    ("A′3", "A′8"), ("A′3", "B3"), ("A′8", "B8"),
+    ("B3", "B8"), ("C3", "C8"), ("B3", "C3"), ("B8", "C8"),
+    ("B3", "D"), ("B8", "D"), ("C3", "D"), ("C8", "D"),
 )
-_LEGACY_LABELS = {"A′2": "A′3", "A′6": "A′8", "B2": "B3", "B6": "B8",
-                  "C2": "C3", "C6": "C8"}
+_LEGACY_LABELS = {"A′3": "A′2", "A′8": "A′6", "B3": "B2", "B8": "B6",
+                  "C3": "C2", "C8": "C6"}
 LEGACY_GROUP_NAMES = tuple(_LEGACY_LABELS.get(group, group) for group in GROUP_NAMES)
 LEGACY_PAIRS = tuple((_LEGACY_LABELS.get(left, left),
                       _LEGACY_LABELS.get(right, right)) for left, right in PAIRS)
 
 
 def _group_names(groups: dict) -> tuple[str, ...]:
-    """Keep pre-budget-change batches exportable under their recorded names."""
+    """Keep 2/6-budget batches exportable under their recorded names."""
     legacy_only = set(LEGACY_GROUP_NAMES) - set(GROUP_NAMES)
     return LEGACY_GROUP_NAMES if legacy_only.intersection(groups) else GROUP_NAMES
 

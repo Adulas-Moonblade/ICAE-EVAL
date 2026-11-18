@@ -17,8 +17,10 @@ import requests
 
 from harness import config as C
 from harness.course_experiment import (GROUPS, _attempt, _coding_prd, _overall,
-                                       _phase, _requirements_prompt, build_parser, run)
-from harness.course_oracle import OracleRelay, confirmed_questions, service_questions
+                                       _phase, _requirements_prompt, _selected_groups,
+                                       build_parser, run)
+from harness.course_oracle import (OracleRelay, _validate_risk_request,
+                                   confirmed_questions, service_questions)
 from harness.runner_common import AgentResult
 
 
@@ -28,17 +30,73 @@ class CourseDataTests(unittest.TestCase):
             build_parser().parse_args([])
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(["--repo", "realcode@005", "--repo", "realcode@006"])
+        self.assertEqual(build_parser().parse_args(["--repo", "realcode@005"])
+                         .user_model_name, "Deepseek-V4.1-Flash")
 
     def test_all_eight_groups_have_separate_strategy_and_budget(self):
         self.assertEqual([g[0] for g in GROUPS],
-                         ["A", "A′2", "A′6", "B2", "B6", "C2", "C6", "D"])
-        self.assertEqual([g[2] for g in GROUPS], [0, 2, 6, 2, 6, 2, 6, 0])
+                         ["A", "A′3", "A′8", "B3", "B8", "C3", "C8", "D"])
+        self.assertEqual([g[2] for g in GROUPS], [0, 3, 8, 3, 8, 3, 8, 0])
+
+    def test_course_group_subset_preserves_requested_order(self):
+        self.assertEqual([g[0] for g in _selected_groups("B3,B8,C3,C8")],
+                         ["B3", "B8", "C3", "C8"])
+        with self.assertRaises(SystemExit):
+            _selected_groups("B3,unknown")
+        with self.assertRaises(SystemExit):
+            _selected_groups("B3,B3")
 
     def test_oracle_prompt_waits_for_each_answer_longer_than_relay_timeout(self):
         prompt = _requirements_prompt("free", 2, "http://127.0.0.1:123/", 180)
         self.assertIn("at least 210 seconds", prompt)
         self.assertIn("Wait for its full answer", prompt)
         self.assertIn("public_test_cases/", prompt)
+        self.assertIn("whole question is specific and fully covered", prompt)
+        self.assertIn("no partial answer", prompt)
+        self.assertIn("still consumes one question", prompt)
+        self.assertIn("independent behaviors or ambiguities", prompt)
+        self.assertIn("one coherent output-contract topic", prompt)
+        self.assertIn("hidden evaluation cases", prompt)
+        self.assertNotIn("partial answers", prompt)
+        self.assertNotIn("more than three technical points", prompt)
+
+    def test_risk_prompt_uses_gap_inventory_without_numeric_ranking(self):
+        prompt = _requirements_prompt("risk", 3, "http://127.0.0.1:123/", 180)
+        self.assertIn("systematically identify", prompt)
+        self.assertIn("every open gap", prompt)
+        self.assertIn("selection_reason", prompt)
+        self.assertIn("focused fallback", prompt)
+        self.assertNotIn("impact*uncertainty", prompt)
+        self.assertNotIn("highest score", prompt)
+        self.assertNotIn("selection_reason", _requirements_prompt(
+            "free", 3, "http://127.0.0.1:123/", 180))
+
+    def test_risk_request_requires_full_inventory_but_allows_reasoned_override(self):
+        gaps = [
+            {"id": "G1", "topic": "add", "uncertainty": "replace or accumulate",
+             "status": "open"},
+            {"id": "G2", "topic": "dump", "uncertainty": "output order",
+             "status": "open"},
+        ]
+        candidates = [
+            {"gap_id": "G1", "question": "add?", "priority": "high",
+             "reason": "affects state"},
+            {"gap_id": "G2", "question": "dump?", "priority": "medium",
+             "reason": "affects output"},
+        ]
+        body = {"gaps": gaps, "candidates": candidates,
+                "selection_reason": "dump blocks the current output design"}
+        self.assertEqual(_validate_risk_request("dump?", body),
+                         (gaps, candidates, body["selection_reason"]))
+        with self.assertRaisesRegex(ValueError, "every open gap"):
+            _validate_risk_request("add?", {**body, "candidates": candidates[:1]})
+        with self.assertRaisesRegex(ValueError, "selection_reason"):
+            _validate_risk_request("add?", {**body, "selection_reason": ""})
+        with self.assertRaisesRegex(ValueError, "selected question"):
+            _validate_risk_request("other?", body)
+        updated = [{**gaps[0], "status": "resolved"}, gaps[1]]
+        self.assertEqual(_validate_risk_request("dump?", {
+            **body, "gaps": updated, "candidates": candidates[1:]} )[0], updated)
 
     def test_coding_prd_contains_oracle_replies(self):
         q = [{"question": "format?", "answer": "JSON", "source": "oracle"}]
@@ -114,21 +172,32 @@ class CourseDataTests(unittest.TestCase):
                 with OracleRelay(append_id="b" * 32, alias="realcode@005",
                                  host="127.0.0.1", port=upstream.server_port,
                                  log_path=Path(tmp) / "risk.jsonl", risk_mode=True) as relay:
+                    gaps = [
+                        {"id": "G1", "topic": "low", "uncertainty": "which output",
+                         "status": "open"},
+                        {"id": "G2", "topic": "high", "uncertainty": "which state",
+                         "status": "open"},
+                    ]
                     candidates = [
-                        {"question": "low", "interpretations": ["a", "b"],
-                         "impact": 1, "uncertainty": 2, "score": 2},
-                        {"question": "high", "interpretations": ["a", "b"],
-                         "impact": 5, "uncertainty": 3, "score": 15}]
+                        {"gap_id": "G1", "question": "low", "priority": "low",
+                         "reason": "local output"},
+                        {"gap_id": "G2", "question": "high", "priority": "high",
+                         "reason": "shared state"}]
                     bad = requests.post(f"http://127.0.0.1:{relay.port}/",
                                         json={"question": "low", "candidates": candidates},
                                         timeout=3)
                     self.assertEqual(bad.status_code, 400)
                     good = requests.post(f"http://127.0.0.1:{relay.port}/",
-                                         json={"question": "high", "candidates": candidates},
+                                         json={"question": "low", "gaps": gaps,
+                                               "candidates": candidates,
+                                               "selection_reason": "better answerability"},
                                          timeout=3)
                     self.assertEqual(good.status_code, 200)
-                self.assertEqual(upstream.received["question"], "high")
-                self.assertIn("risk_candidates", (Path(tmp) / "risk.jsonl").read_text())
+                self.assertEqual(upstream.received["question"], "low")
+                recorded = json.loads((Path(tmp) / "risk.jsonl").read_text().splitlines()[0])
+                self.assertEqual(recorded["risk_gaps"], gaps)
+                self.assertEqual(recorded["risk_candidates"], candidates)
+                self.assertEqual(recorded["risk_selection_reason"], "better answerability")
         finally:
             upstream.shutdown()
             upstream.server_close()
@@ -295,7 +364,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                  patch("harness.course_experiment.ua.update_repo_status"), \
                  patch("harness.course_experiment.ua.fetch_interaction_log",
                        return_value=[entry]):
-                row = await _attempt("realcode@005", "B2", "free", 2,
+                row = await _attempt("realcode@005", "B3", "free", 3,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
             saved = [json.loads(line) for line in (
@@ -413,7 +482,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                        return_value=entries), \
                  patch("harness.course_experiment.ua.fetch_interaction_stats",
                        return_value={"ok": True}):
-                row = await _attempt("realcode@005", "B6", "free", 6,
+                row = await _attempt("realcode@005", "B8", "free", 8,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
         self.assertEqual(row["status"], "success", row)
@@ -478,7 +547,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                            return_value=[{"question": "known?", "answer": "known answer"}]), \
                      patch("harness.course_experiment.ua.fetch_interaction_stats",
                            return_value={"ok": True}):
-                    row = await _attempt("realcode@005", "B2", "free", 2,
+                    row = await _attempt("realcode@005", "B3", "free", 3,
                                          "fuzzy", "detailed", Path("image.tar"),
                                          args, {}, "batch")
                 self.assertEqual(row["status"], "success", row)
@@ -514,7 +583,7 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
                  patch("harness.course_experiment.ua.mint_append_id", return_value=append_id), \
                  patch("harness.course_experiment.ua.init_settings"), \
                  patch("harness.course_experiment.ua.update_repo_status"):
-                row = await _attempt("realcode@005", "A′2", "self", 2,
+                row = await _attempt("realcode@005", "A′3", "self", 3,
                                      "fuzzy", "detailed", Path("image.tar"),
                                      args, {}, "batch")
         self.assertEqual(row["status"], "generation_error")
@@ -522,7 +591,8 @@ class CourseRunTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_requires_one_repo_and_runs_eight_groups(self):
         args = SimpleNamespace(repo="realcode@005,realcode@006", model_name="Codex-config",
-                               user_model_name="Qwen3.8-Flash", max_retries=0)
+                               user_model_name="Qwen3.8-Flash", max_retries=0,
+                               groups=None)
         with self.assertRaises(SystemExit):
             await run(args)
         args.repo = "realcode@005"

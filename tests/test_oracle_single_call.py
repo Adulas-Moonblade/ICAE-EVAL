@@ -13,6 +13,32 @@ import user_agent as oracle_core
 
 
 class OracleSingleCallTests(unittest.TestCase):
+    def test_deepseek_oracle_reuses_openai_credentials_without_changing_model(self):
+        models = {
+            "Qwen3.8-Flash": [{"api_type": "openai", "model_name": "qwen3.8-flash",
+                               "base_url": "https://example.invalid/v1", "api_key": "shared-key"}],
+            "Deepseek-V4.1-Flash": [{"api_type": "openai",
+                                     "model_name": "deepseek-v4.1-flash",
+                                     "credentials_from": "Qwen3.8-Flash"}],
+        }
+        with patch.object(oracle_core, "_load_user_models", return_value=models), \
+             patch.object(oracle_core, "_call_backend", return_value="reply") as call:
+            answer = oracle_core._call_with_rr("Deepseek-V4.1-Flash", "system", [])
+        self.assertEqual(answer, "reply")
+        config = call.call_args.args[0]
+        self.assertEqual(config["model_name"], "deepseek-v4.1-flash")
+        self.assertEqual(config["api_key"], "shared-key")
+        self.assertEqual(config["base_url"], "https://example.invalid/v1")
+
+    def test_system_prompt_requires_whole_question_fallback_for_mixed_requests(self):
+        prompt = oracle_core.build_system_prompt({"oracle_data": {}})
+        self.assertIn("mixes covered and uncovered behavior", prompt)
+        self.assertIn("Do not disclose the covered portion of a mixed question", prompt)
+        self.assertIn("one coherent question", prompt)
+        self.assertIn("not separate topics", prompt)
+        self.assertIn("independent requirement topics or ambiguities", prompt)
+        self.assertIn("A fallback response still consumes one interaction", prompt)
+
     def test_one_model_call_returns_reply_without_protocol_validation(self):
         raw = json.dumps({"reply": "Known rule", "_internal_log": {
             "fallback_triggered": True}})
@@ -51,6 +77,42 @@ class OracleSingleCallTests(unittest.TestCase):
 
 
 class OracleServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fallback_reply_consumes_one_turn(self):
+        append_id = "d" * 32
+        task_id = "sample"
+        fallback = "Please ask a specific covered question."
+        raw = json.dumps({"reply": fallback, "_internal_log": {
+            "triggers_hit": [], "fallback_triggered": True,
+            "api_alignment_triggered": False,
+            "cheating_attempt_detected": False, "score_adjustment": 0}})
+        request = SimpleNamespace(json=AsyncMock(return_value={
+            "append_id": append_id, "task_id": task_id,
+            "question": "Known rule plus an undefined behavior?"}))
+
+        async def immediate(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(oracle_service, "LOG_DIR", Path(tmp)), \
+             patch.object(oracle_service, "_save_session"), \
+             patch.object(oracle_service.asyncio, "to_thread", side_effect=immediate), \
+             patch.object(oracle_core, "load_record", return_value={"oracle_data": {}}), \
+             patch.object(oracle_core, "_call_with_rr", return_value=raw):
+            session = oracle_core.UserAgentSession(task_id)
+            record = {"sess": session, "count": 0, "lock": asyncio.Lock()}
+            with patch.dict(oracle_service.valid_append_ids, {append_id: {
+                     "max_interactions": 2, "model": "model"}}), \
+                 patch.dict(oracle_service.sessions, {(append_id, task_id): record}):
+                response = await oracle_service.chat_endpoint(request)
+            log_path = Path(tmp) / task_id / f"{append_id}.jsonl"
+            entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+
+        self.assertEqual(response["data"], fallback)
+        self.assertEqual(response["status"]["remaining"], 1)
+        self.assertEqual(record["count"], 1)
+        self.assertTrue(entries[0]["fallback_triggered"])
+        self.assertEqual(entries[0]["triggers_hit"], [])
+
     async def test_parse_error_consumes_one_turn_and_raw_text_is_logged(self):
         append_id = "f" * 32
         task_id = "sample"

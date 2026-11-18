@@ -805,7 +805,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--user-model-name", default=None,
                    help="configured User Agent (Oracle) model key; synced at "
                         "init so it binds the model to the append_id "
-                        "(default: Qwen3.8-Flash for Codex, DeepSeek-V3.2 otherwise)")
+                        "(default: Deepseek-V4.1-Flash for Codex, DeepSeek-V3.2 otherwise)")
     r.add_argument("--no-eval", dest="eval", action="store_false")
     r.set_defaults(eval=True, only_eval=False)
 
@@ -820,7 +820,7 @@ def main() -> None:
     if args.only_eval and not args.append_id:
         raise SystemExit("eval requires --append-id")
     if not args.only_eval and args.user_model_name is None:
-        args.user_model_name = ("Qwen3.8-Flash" if args.agent_framework == "codex"
+        args.user_model_name = ("Deepseek-V4.1-Flash" if args.agent_framework == "codex"
                                 else "DeepSeek-V3.2")
     asyncio.run(run_async(args))
 

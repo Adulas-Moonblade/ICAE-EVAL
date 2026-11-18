@@ -31,7 +31,7 @@ if [ "$#" -gt 0 ] && [[ "$1" != -* ]]; then
     shift
 fi
 
-# The course entry point requires --repo and always runs all eight groups.
+# The course entry point requires --repo and runs all eight groups unless --groups is set.
 COURSE_MODE=false
 course_args=()
 for argument in "$@"; do
@@ -126,7 +126,7 @@ done
 
 if [ "$AGENT_FRAMEWORK" = "codex" ]; then
     if [ "$MODEL_NAME_EXPLICIT" = false ]; then MODEL_NAME="Codex-config"; fi
-    if [ "$USER_MODEL_NAME_EXPLICIT" = false ]; then USER_MODEL_NAME="Qwen3.8-Flash"; fi
+    if [ "$USER_MODEL_NAME_EXPLICIT" = false ]; then USER_MODEL_NAME="Deepseek-V4.1-Flash"; fi
     export USER_MODEL_NAME
 fi
 
@@ -141,7 +141,7 @@ Defaults:
   scope            one repo from the lite set (or $RUN_LIMIT)
   concurrency      4 (or $CONCURRENCY)
   framework        claude-code (or $AGENT_FRAMEWORK)
-  Oracle model     Qwen3.8-Flash for Codex, DeepSeek-V3.2 otherwise
+  Oracle model     Deepseek-V4.1-Flash for Codex, DeepSeek-V3.2 otherwise
                    override with --user-model-name or $USER_MODEL_NAME
 
 Examples:
@@ -304,14 +304,27 @@ if user_model_name not in users:
     )
 user_entries = users[user_model_name]
 user_entries = user_entries if isinstance(user_entries, list) else [user_entries]
+def resolve_credentials(entry):
+    source_name = entry.get("credentials_from")
+    if not source_name:
+        return entry
+    sources = users.get(source_name, [])
+    sources = sources if isinstance(sources, list) else [sources]
+    source = next((candidate for candidate in sources
+                   if isinstance(candidate, dict)
+                   and candidate.get("api_type") == "openai"
+                   and candidate.get("base_url") and candidate.get("api_key")), None)
+    if entry.get("api_type") != "openai" or source is None:
+        return entry
+    return {**entry, "base_url": source["base_url"], "api_key": source["api_key"]}
 user_keys = {
     "anthropic": ("model_name", "base_url", "auth_token"),
     "openai": ("model_name", "base_url", "api_key"),
 }
 if not any(
-    all(entry.get(key) and not placeholder(entry[key])
+    all(resolved.get(key) and not placeholder(resolved[key])
         for key in user_keys.get(entry.get("api_type"), ()))
-    for entry in user_entries
+    for entry in user_entries for resolved in [resolve_credentials(entry)]
     if entry.get("api_type") in user_keys
 ):
     raise SystemExit(

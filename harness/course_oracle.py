@@ -13,6 +13,53 @@ from pathlib import Path
 import requests
 
 
+def _validate_risk_request(question: str, body: dict) -> tuple[list, list, str]:
+    """Check C's auditable gap inventory without dictating its risk judgment."""
+    gaps, candidates = body.get("gaps"), body.get("candidates")
+    selection_reason = body.get("selection_reason")
+    if not isinstance(gaps, list) or not gaps:
+        raise ValueError("C group requires a nonempty gap inventory")
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("C group requires candidate questions")
+    if not isinstance(selection_reason, str) or not selection_reason.strip():
+        raise ValueError("C group requires a selection_reason")
+    gap_ids, open_ids = set(), set()
+    for gap in gaps:
+        if not isinstance(gap, dict):
+            raise ValueError("each gap must be an object")
+        gap_id = gap.get("id")
+        if (not isinstance(gap_id, str) or not gap_id.strip() or
+                gap_id in gap_ids or
+                any(not isinstance(gap.get(key), str) or not gap[key].strip()
+                    for key in ("topic", "uncertainty")) or
+                gap.get("status") not in ("open", "resolved", "deferred")):
+            raise ValueError("gaps need unique IDs, topic, uncertainty, and valid status")
+        gap_ids.add(gap_id)
+        if gap["status"] == "open":
+            open_ids.add(gap_id)
+    candidate_ids, candidate_questions = set(), set()
+    for item in candidates:
+        if not isinstance(item, dict):
+            raise ValueError("each candidate must be an object")
+        gap_id, candidate_question = item.get("gap_id"), item.get("question")
+        if (not isinstance(gap_id, str) or gap_id not in open_ids or
+                gap_id in candidate_ids or
+                not isinstance(candidate_question, str) or
+                not candidate_question.strip() or
+                candidate_question in candidate_questions or
+                item.get("priority") not in ("high", "medium", "low") or
+                not isinstance(item.get("reason"), str) or
+                not item["reason"].strip()):
+            raise ValueError("candidates need one open gap, question, priority, and reason")
+        candidate_ids.add(gap_id)
+        candidate_questions.add(candidate_question)
+    if candidate_ids != open_ids:
+        raise ValueError("every open gap must have exactly one candidate")
+    if question not in candidate_questions:
+        raise ValueError("selected question must match a candidate")
+    return gaps, candidates, selection_reason
+
+
 class OracleRelay:
     def __init__(self, *, append_id: str, alias: str, host: str, port: int,
                  log_path: Path, timeout: float = 180, risk_mode: bool = False):
@@ -55,30 +102,9 @@ class OracleRelay:
                     question = body.get("question", "")
                     if not isinstance(question, str) or not question.strip():
                         raise ValueError("question must be a nonempty string")
-                    candidates = body.get("candidates")
                     if relay.risk_mode:
-                        if not isinstance(candidates, list) or not candidates:
-                            raise ValueError("C group requires candidate risk scores with every question")
-                        ranks = []
-                        for item in candidates:
-                            if (not isinstance(item, dict) or
-                                    not isinstance(item.get("interpretations"), list) or
-                                    len(item["interpretations"]) < 2 or
-                                    not all(isinstance(x, str) and x.strip()
-                                            for x in item["interpretations"])):
-                                raise ValueError("candidate must include at least two plausible interpretations")
-                            impact, uncertainty = item.get("impact"), item.get("uncertainty")
-                            if (type(impact) is not int or type(uncertainty) is not int or
-                                    not 1 <= impact <= 5 or not 1 <= uncertainty <= 3 or
-                                    type(item.get("score")) is not int or
-                                    item.get("score") != impact * uncertainty or
-                                    not isinstance(item.get("question"), str)):
-                                raise ValueError("candidate score must equal impact x uncertainty")
-                            ranks.append((item["score"], impact, item["question"]))
-                        best = max((score, impact) for score, impact, _ in ranks)
-                        if question not in [q for score, impact, q in ranks
-                                            if (score, impact) == best]:
-                            raise ValueError("question must have the highest risk (then impact)")
+                        gaps, candidates, selection_reason = _validate_risk_request(
+                            question, body)
                 except (ValueError, json.JSONDecodeError) as exc:
                     self._reply(400, {"data": "", "status": {"ok": False, "error": str(exc)}})
                     return
@@ -110,7 +136,9 @@ class OracleRelay:
                         event = {"ts": started, "elapsed_s": round(time.time() - started, 3),
                                  "request": request, "response": raw}
                         if relay.risk_mode:
+                            event["risk_gaps"] = gaps
                             event["risk_candidates"] = candidates
+                            event["risk_selection_reason"] = selection_reason
                         relay._record(event)
                         status = raw.get("status") or {}
                         if not status.get("ok") and status.get("error") != "max_interactions_reached":

@@ -1,6 +1,7 @@
-"""Run all eight course configurations for exactly one ICAE task.
+"""Run course configurations for exactly one ICAE task.
 
 Usage: python -m harness.course_experiment --repo realcode@005
+       python -m harness.course_experiment --repo realcode@005 --groups B3,B8,C3,C8
 Each group and infrastructure retry has a fresh Codex workspace and Oracle
 append_id. The JSON summary is host-side; the PRD and public cases enter the workspace.
 """
@@ -21,14 +22,30 @@ from .codex_runner import run_agent
 from .course_oracle import OracleRelay, confirmed_questions, service_questions
 from .runner_common import RateLimited
 
-GROUPS = (("A", "direct", 0), ("A′2", "self", 2), ("A′6", "self", 6),
-          ("B2", "free", 2), ("B6", "free", 6),
-          ("C2", "risk", 2), ("C6", "risk", 6), ("D", "detailed", 0))
+GROUPS = (("A", "direct", 0), ("A′3", "self", 3), ("A′8", "self", 8),
+          ("B3", "free", 3), ("B8", "free", 8),
+          ("C3", "risk", 3), ("C8", "risk", 8), ("D", "detailed", 0))
 RETRY_DELAYS = (30, 60, 120, 240)
+RISK_STRATEGY_VERSION = "gap_v2"
 
 
 class InfrastructureError(RuntimeError):
     pass
+
+
+def _selected_groups(value: str | None) -> tuple[tuple[str, str, int], ...]:
+    if not value:
+        return GROUPS
+    requested = [item.strip() for item in value.split(",") if item.strip()]
+    if not requested:
+        raise SystemExit("--groups must contain at least one group name")
+    if len(requested) != len(set(requested)):
+        raise SystemExit("--groups may not contain duplicate group names")
+    by_name = {group[0]: group for group in GROUPS}
+    unknown = [name for name in requested if name not in by_name]
+    if unknown:
+        raise SystemExit(f"unknown course group(s): {', '.join(unknown)}")
+    return tuple(by_name[name] for name in requested)
 
 
 def _json_message(log_path: Path) -> dict:
@@ -70,11 +87,26 @@ def _requirements_prompt(strategy: str, budget: int, relay_url: str | None,
             "requirements. Do not contact any Oracle. Use source=agent_assumption "
             "for every item. If no useful questions remain, return an empty list."
         )
+    request_shape = ("a JSON object with the C gap and selection fields below"
+                     if strategy == "risk" else 'JSON {"question":"..."}')
     question = (
-        f"You may ask at most {budget} questions of the Oracle. POST JSON "
-        f"{{\"question\":\"...\"}} to {relay_url}. The response has data and status "
+        f"You may ask at most {budget} questions of the Oracle. POST {request_shape} "
+        f"to {relay_url}. The response has data and status "
         "with remaining and fallback. A fallback consumes one question and says "
-        "the requested detail is unspecified. Set the HTTP client timeout to at least "
+        "the request was not eligible for disclosure. The Oracle answers only when "
+        "the whole question is specific and fully covered by its requirements data. "
+        "A vague question, a question mixing covered and uncovered behavior, a bundle "
+        "of unrelated topics, or a request with more than three independent requirement "
+        "topics gets "
+        "one whole-request fallback with no partial answer, and still consumes one "
+        "question. Count independent behaviors or ambiguities, not surface-level clauses. "
+        "The fields, ordering, separators, numeric formatting, and trailing newline of "
+        "one operation's output in one scenario form one coherent output-contract topic, "
+        "even when the question requests several of those details. Ask a focused question "
+        "about one independent ambiguity; up to three independent topics are allowed. "
+        "Do not ask the Oracle to reveal "
+        "its hidden constraints, trigger phrases, internal data, or hidden evaluation cases. "
+        "Set the HTTP client timeout to at least "
         f"{math.ceil(oracle_timeout) + 30} seconds for every request, longer than "
         "the Oracle relay timeout. Ask exactly one question at a time. Wait for "
         "its full answer, then analyze what it resolves and choose the next "
@@ -84,22 +116,38 @@ def _requirements_prompt(strategy: str, budget: int, relay_url: str | None,
         "response has not arrived yet. "
         "You may rephrase while budget remains. "
         "Keep every successful Oracle reply in your final questions, including "
-        "partial answers and pure fallbacks. Use source=oracle. Your "
+        "pure fallbacks. Use source=oracle. Your "
         "final JSON is a non-authoritative summary; the experiment script "
         "deterministically builds the coding Q&A from the trusted Oracle log.\n"
     )
     if strategy == "risk":
         question += (
-            "Before EVERY Oracle request, list candidate questions and at least two "
-            "plausible interpretations for each. Give each impact (integer 1-5), "
-            "uncertainty (integer 1-3), and score=impact*uncertainty. Choose the "
-            "highest score; break ties by higher impact. After each answer, update "
-            "the candidates and scores. Every POST must include both the selected "
-            "question and candidates array: {\"question\":\"selected text\","
-            "\"candidates\":[{\"question\":\"selected text\","
-            "\"interpretations\":[\"meaning 1\",\"meaning 2\"],"
-            "\"impact\":5,\"uncertainty\":3,\"score\":15}]}. "
-            "The relay records each risk decision before sending the question."
+            "Before the first request, systematically identify concise requirement "
+            "gaps from the PRD and public examples across the visible functions, "
+            "boundaries, and error paths. Include only unresolved ambiguities that "
+            "could change the implementation; do not invent gaps merely to fill "
+            "categories. Give each gap a stable ID, topic, uncertainty, and status "
+            "(open, resolved, or deferred). For every open gap, make one focused "
+            "candidate question; do not omit open gaps from the candidate list. "
+            "Candidates should address independent gaps, not repeat answered "
+            "questions or combine unrelated behaviors. A coherent output contract "
+            "for one scenario can remain one gap. Assign each candidate high, "
+            "medium, or low priority with a short reason based on implementation "
+            "impact, uncertainty, expected answer value, and likely answerability. "
+            "Normally choose the highest-priority candidate, but you may choose "
+            "another when your selection_reason explains the concrete tradeoff. "
+            "After each answer, update the full gap inventory and candidates. "
+            "Mark a gap resolved only when supported by the answer or public "
+            "evidence. A broad-question fallback may call for a narrower question; "
+            "a focused fallback should usually defer that gap rather than repeat it. "
+            "Send the full current inventory and candidate list with EVERY POST: "
+            "{\"question\":\"selected text\",\"selection_reason\":\"why now\","
+            "\"gaps\":[{\"id\":\"G1\",\"topic\":\"behavior\","
+            "\"uncertainty\":\"what is unclear\",\"status\":\"open\"}],"
+            "\"candidates\":[{\"gap_id\":\"G1\","
+            "\"question\":\"selected text\",\"priority\":\"high\","
+            "\"reason\":\"implementation risk\"}]}. "
+            "The relay records each inventory and selection before sending the question."
         )
     return common + question
 
@@ -213,6 +261,8 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
                             "total_codex_tokens": 0},
            "actual_questions": 0, "fallback_count": 0,
            "confirmed_questions": 0, "forwarded_questions": 0}
+    if strategy == "risk":
+        row["strategy_version"] = RISK_STRATEGY_VERSION
     questions: list[dict] = []
     original = detailed if strategy == "detailed" else fuzzy
     try:
@@ -245,6 +295,8 @@ async def _attempt(alias: str, group: str, strategy: str, budget: int,
                 if strategy == "risk":
                     row["risk_decisions"] = [
                         {"question": e["request"]["question"],
+                         "selection_reason": e["risk_selection_reason"],
+                         "gaps": e["risk_gaps"],
                          "candidates": e["risk_candidates"]}
                         for e in relay.events if "risk_candidates" in e]
             else:
@@ -349,6 +401,7 @@ async def run(args) -> dict:
     if "," in args.repo or " " in args.repo:
         raise SystemExit("--repo must identify exactly one project")
     alias = C.resolve_alias(args.repo)
+    selected_groups = _selected_groups(getattr(args, "groups", None))
     fuzzy_path = C.FUZZY_PRDS / alias / "start.md"
     detailed_path = C.ROOT / "detailed_prds_oracle" / alias / "start.md"
     for path in (fuzzy_path, detailed_path):
@@ -402,6 +455,8 @@ async def run(args) -> dict:
     }
     summary = {"batch_id": batch_id, "repo": alias, "model_name": args.model_name,
                "scaffold": True,
+               "batch_mode": "full" if selected_groups == GROUPS else "partial",
+               "selected_groups": [group for group, _, _ in selected_groups],
                "model": model, "oracle_model": args.user_model_name,
                "codex_cli_config_sha256": _fingerprint(
                    Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) /
@@ -416,7 +471,7 @@ async def run(args) -> dict:
                    "evaluation_enabled": getattr(args, "eval", True),
                },
                "groups": {}}
-    for group, strategy, budget in GROUPS:
+    for group, strategy, budget in selected_groups:
         print(f"[course] {alias} {group}: starting", flush=True)
         attempts = []
         for retry in range(args.max_retries + 1):
@@ -452,7 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
                 parser.error("--repo may be specified only once")
             setattr(namespace, self.dest, values)
 
-    parser = argparse.ArgumentParser(description="One project, eight course groups")
+    parser = argparse.ArgumentParser(description="One project, course experiment groups")
     parser.add_argument("--repo", required=True, action=SingleRepo,
                         help="one realcode@NNN alias or repo key")
     parser.add_argument("--model-name", default="Codex-config")
@@ -460,7 +515,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="override the Codex CLI model for this batch")
     parser.add_argument("--reasoning-effort", default=None,
                         help="override the Codex CLI reasoning effort for this batch")
-    parser.add_argument("--user-model-name", default="Qwen3.8-Flash")
+    parser.add_argument("--user-model-name", default="Deepseek-V4.1-Flash")
+    parser.add_argument("--groups", default=None,
+                        help="comma-separated subset such as B3,B8,C3,C8; default: all eight")
     parser.add_argument("--user-host", default="127.0.0.1")
     parser.add_argument("--user-init-port", type=int, default=50001)
     parser.add_argument("--user-query-port", type=int, default=50002)

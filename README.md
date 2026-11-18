@@ -134,7 +134,7 @@ The default command performs a one-repository smoke test with `Opus-4.8`. It use
 
 Install and configure Codex CLI before the run. The Codex runner calls `codex exec` and uses the CLI's existing provider and `~/.codex/auth.json` authentication. It does not read `ANTHROPIC_*` or `OPENHANDS_*` endpoints from `model_list.json`. The default `Codex-config` entry pins `gpt-6-sol` with `medium` reasoning for this experiment via `CODEX_MODEL` and `CODEX_REASONING_EFFORT`; provider routing and authentication still come from Codex CLI. You can choose another configured entry with `--model-name`, or omit an entry to use your CLI model settings.
 
-The Oracle is independent of the coding agent. For Codex runs its default is `Qwen3.8-Flash`; pass `--user-model-name Qwen3.7-Flash` (or another configured registry key) to select a different Oracle. The default applies only when no Oracle model is specified. Configure the selected model in `user_agent/user_model.local.json` before running.
+The Oracle is independent of the coding agent. For Codex runs its default is `Deepseek-V4.1-Flash` (`model_name=deepseek-v4.1-flash`); pass `--user-model-name Qwen3.8-Flash` (or another configured registry key) to select a different Oracle. The DeepSeek entry reuses the OpenAI-compatible endpoint and API key of the Qwen3.8-Flash entry in `user_agent/user_model.local.json`. The default applies only when no Oracle model is specified.
 
 Codex runs inside a cached development image derived from the task's base image. The harness copies the installed static Codex binary into that image and mounts the host CLI's `config.toml` and `auth.json` into the running container. Set `ICAE_CODEX_BINARY` if the static binary is installed at a different path. Evaluation uses the original base image. Codex writes its event stream to `results/<append_id>/trajectory/<alias>.jsonl` and a readable log beside it. Token counts come from Codex's `turn.completed` usage, including cached input tokens. Codex CLI does not report a cost or a model-iteration count, so `cost_usd` stays `0` and `num_turns` counts the top-level `exec` turn. `--max-turns` cannot limit Codex's internal model iterations; use `--timeout` to bound a run.
 
@@ -142,17 +142,19 @@ The development container uses host networking so Codex can reach the local Orac
 
 #### Eight-group course experiment
 
-Run exactly one project per invocation. The command requires `--repo` and executes A, A′2, A′6, B2, B6, C2, C6, and D in order:
+Run exactly one project per invocation. The command requires `--repo` and executes A, A′3, A′8, B3, B8, C3, C8, and D in order:
 
 ```bash
 ./run.sh --course --repo realcode@005
-./run.sh --course --repo realcode@005 --model-name Codex-config --user-model-name Qwen3.8-Flash
+./run.sh --course --repo realcode@005 --model-name Codex-config --user-model-name Deepseek-V4.1-Flash
 ./run.sh --course --repo realcode@005 --codex-model gpt-6-sol --reasoning-effort medium
 ```
 
-A and D have a recorded requirements phase with zero clarification time. A′2/A′6 form their own assumptions; B/C ask the Oracle through a relay, with 2/6 question budgets. The harness obtains the original Oracle service log for B/C, forwards all Oracle replies to coding, and saves the complete log on the host. Every group starts coding in a freshly initialized workspace and a new Codex session. Infrastructure retries receive new `append_id` values; failed attempts are retained but are not evaluated. The D input is `detailed_prds_oracle/<alias>/start.md`. Default timeouts are 60 minutes for requirements, 120 minutes for coding, 180 seconds per Oracle request, and 40 minutes per evaluation tier. The 15-minute Codex inactivity limit also applies. Reports still recognize earlier batches recorded with 3/8 budgets under their original group names.
+A and D have a recorded requirements phase with zero clarification time. A′3/A′8 form their own assumptions; B/C ask the Oracle through a relay, with 3/8 question budgets. The harness obtains the original Oracle service log for B/C, forwards all Oracle replies to coding, and saves the complete log on the host. Every group starts coding in a freshly initialized workspace and a new Codex session. Infrastructure retries receive new `append_id` values; failed attempts are retained but are not evaluated. The D input is `detailed_prds_oracle/<alias>/start.md`. Default timeouts are 60 minutes for requirements, 120 minutes for coding, 180 seconds per Oracle request, and 40 minutes per evaluation tier. The 15-minute Codex inactivity limit also applies. Reports still recognize batches recorded with the temporary 2/6 budgets under their original group names.
 
-The older `文档.pdf` still describes 3/8 budgets because its editable source is not in this repository. For runs started with this checkout, the 2/6 configuration above is authoritative; revise the PDF before distributing it as the current experiment manual.
+C uses the `gap_v2` risk strategy: before asking, the requirements agent inventories unresolved implementation-relevant gaps across the PRD and public examples. Each open gap has one focused candidate question with a high/medium/low priority and reason. The agent normally chooses the highest-priority candidate but may choose another with an explicit selection reason. Every C request carries the full current gap inventory and candidates; the relay validates their structure and logs the decision, without enforcing numeric scores. The agent updates gap status after each answer or Fallback. The batch summary records `strategy_version` and per-turn `risk_decisions`; coding still receives only trusted Oracle Q&A. Earlier C runs used numeric risk scores and are a different experimental condition.
+
+The older `文档.pdf` describes the same 3/8 budgets used by the current harness.
 
 Results are indexed by `results/course_runs/<batch_id>/summary.json`. Each group also has its own `results/<append_id>/` with requirements and coding JSONL, Oracle logs, generated code, and `objective.json` under `_eval/<alias>/`. `--no-eval` skips the final objective test. The course entry point uses Fuzzy L1 (`fuzzy_prds/`) and supplies the same public test case scaffold to all eight groups.
 

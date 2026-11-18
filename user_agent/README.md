@@ -7,7 +7,7 @@
 - **唯一信息来源**：每个任务对应的 `prd_json/<username>__<repo_name>.json` 里的 `oracle_data`（`hidden_constraints` / `context_pointers` / `golden_api_signature` / `fallback_response`）。
 - **不读真实仓库**：所以 User Agent 没有任何工具（纯对话），用 `anthropic` 的 Messages API 实现，而不是 Agent SDK —— Agent SDK 自带的 Claude Code 身份会把 Oracle 人设冲掉。
 - **严格 JSON 输出**：模型每轮输出 `{"_internal_log": {...}, "reply": "..."}`；只有 `reply` 会回给被测 Agent，`_internal_log` 留作内部计分。
-- **Fallback 与日志**：提示词要求仅在整条问题完全没有已知答案时使用 Fallback；混合问题应保留已知答案。服务端每轮只调用一次模型；解析失败时转交原始文本并单独记录 `parse_error`。字段缺失或类型异常只做不阻断回答的兜底，并在服务日志的 `schema_errors` 中记录。日志保留模型的 `raw_response`；Fallback Rate 仅根据模型输出的有效 `fallback_triggered` 布尔值计算。
+- **Fallback 与日志**：只有整条问题足够具体且全部由 Oracle 数据覆盖时才允许披露约束。含糊问题、未命中问题、混合已定义/未定义行为的问题，以及打包过多独立主题的问题，都必须原样返回 `fallback_response`，不披露部分命中内容；同一操作、同一场景的一项完整输出契约（字段、顺序、格式、换行等）只算一个主题。Fallback 仍正常消耗一次交互预算。服务端每轮只调用一次模型；解析失败时转交原始文本并单独记录 `parse_error`。字段缺失或类型异常只做不阻断回答的兜底，并在服务日志的 `schema_errors` 中记录。日志保留模型的 `raw_response`；Fallback Rate 仅根据模型输出的有效 `fallback_triggered` 布尔值计算。
 
 ## 目录结构
 
@@ -45,6 +45,8 @@ user_agent/
 Oracle 使用的模型在 `user_model.json` 里配置（与被测模型的 `model_list.json` 同构）。每个模型键映射到一个或多个后端端点；运行时按轮询 + 失败跳过来分流高并发请求：
 
 需要填写真实密钥时，复制为 `user_model.local.json` 并在副本中填写。该文件已被 Git 忽略，存在时会优先读取。
+
+`Deepseek-V4.1-Flash` 使用 `model_name=deepseek-v4.1-flash`；其 `credentials_from: Qwen3.8-Flash` 会复用该 OpenAI 兼容端点的 URL 和密钥，避免在本地配置中复制凭证。
 
 ```json
 {

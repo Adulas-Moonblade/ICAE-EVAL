@@ -34,6 +34,14 @@
         }
     ],
 
+    "Deepseek-V4.1-Flash": [
+        {
+            "api_type": "openai",
+            "model_name": "deepseek-v4.1-flash",
+            "credentials_from": "Qwen3.8-Flash"
+        }
+    ],
+
     "Qwen3.7-Flash": [
         {
             "api_type": "openai",

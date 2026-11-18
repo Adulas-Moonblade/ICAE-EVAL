@@ -153,6 +153,18 @@ def _call_with_rr(model_key: str, system: str, messages: list) -> str:
         cfgs = [cfgs]  # backward compat if someone passes old single-dict format
 
     idx, cfg = _pick_backend(model_key, cfgs)
+    source_name = cfg.get("credentials_from")
+    if source_name:
+        if cfg.get("api_type") != "openai":
+            raise ValueError("credentials_from requires an OpenAI-compatible endpoint")
+        sources = models.get(source_name, [])
+        sources = sources if isinstance(sources, list) else [sources]
+        source = next((entry for entry in sources if isinstance(entry, dict)
+                       and entry.get("api_type") == "openai"
+                       and entry.get("base_url") and entry.get("api_key")), None)
+        if source is None:
+            raise ValueError(f"no OpenAI endpoint configured for user model {source_name!r}")
+        cfg = {**cfg, "base_url": source["base_url"], "api_key": source["api_key"]}
     try:
         text = _call_backend(cfg, system, messages)
         return text
